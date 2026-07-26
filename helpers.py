@@ -23,6 +23,20 @@ def format_duration(seconds: float) -> str:
     return f"{secs}s"
 
 
+def format_bytes(num: int) -> str:
+    """Human-readable size, e.g. 12.3 MB."""
+    step = 1024.0
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(num)
+    for unit in units:
+        if value < step or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= step
+    return f"{num} B"
+
+
 class ElapsedTimer:
     """Track how long a task has been running; used in status messages."""
 

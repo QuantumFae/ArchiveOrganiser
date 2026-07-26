@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from helpers import format_bytes
 
 DEFAULT_QUARANTINE_NAME = "ArchiveOrganiser_Quarantine"
 
@@ -72,20 +73,6 @@ def move_to_quarantine(
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     log.append(f"Manifest saved: {manifest_path}")
     return session, log
-
-
-def format_bytes(num: int) -> str:
-    """Human-readable size, e.g. 12.3 MB."""
-    step = 1024.0
-    units = ["B", "KB", "MB", "GB", "TB"]
-    value = float(num)
-    for unit in units:
-        if value < step or unit == units[-1]:
-            if unit == "B":
-                return f"{int(value)} {unit}"
-            return f"{value:.1f} {unit}"
-        value /= step
-    return f"{num} B"
 
 
 def permanently_delete(paths: list[Path]) -> list[str]:

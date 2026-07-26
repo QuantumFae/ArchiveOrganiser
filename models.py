@@ -42,7 +42,7 @@ def category_for_name(name: str) -> str:
     return category_for(Path(name))
 
 
-@dataclass
+@dataclass(slots=True)
 class FileInfo:
     """One file found during a scan (disk file or item inside a zip)."""
 
@@ -92,3 +92,7 @@ class ScanResult:
     skipped: int = 0
     archive_members: int = 0
     duration_seconds: float = 0.0
+    # Sum of on-disk file sizes (zip members counted separately via their listed size)
+    total_bytes: int = 0
+    # Folders skipped because they lived on another filesystem/mount
+    cross_device_skipped: int = 0
