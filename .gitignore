@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+ArchiveOrganiser_Quarantine/
+*.egg-info/
+.DS_Store
