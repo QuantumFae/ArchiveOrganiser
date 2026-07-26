@@ -7,6 +7,14 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from models import FileInfo
+from quarantine import DEFAULT_QUARANTINE_NAME
+from best_practices import apply_naming, looks_financial, readme_for_folder
+from custom_structure import (
+    CustomStructure,
+    custom_destination,
+    custom_tree_preview,
+    parse_custom_structure,
+)
 
 
 @dataclass
@@ -22,6 +30,162 @@ class OrganisePlanItem:
 class OrganisePlan:
     items: list[OrganisePlanItem] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    layout_id: str = "type_date"
+    layout_name: str = ""
+
+
+@dataclass(frozen=True)
+class LayoutPreset:
+    """One pre-defined folder layout the user can choose."""
+
+    id: str
+    name: str
+    description: str
+    example: str
+    # Categories that make this layout especially useful (empty = always useful)
+    useful_for: tuple[str, ...] = ()
+
+
+LAYOUT_PRESETS: list[LayoutPreset] = [
+    LayoutPreset(
+        id="type_date",
+        name="Type + date",
+        description="Photos/Videos/Audio by year/month; documents by file type.",
+        example="Photos/2022/07/ · Documents/pdf/ · Archives/",
+        useful_for=("Photos", "Videos", "Audio", "Documents", "Other"),
+    ),
+    LayoutPreset(
+        id="life_areas",
+        name="Life areas (Personal / Media / Finance / Archive)",
+        description="Top-level life areas used in personal folder guides — clear homes for everyday files.",
+        example="01_Personal/ · 02_Media/Photos/ · 03_Finance/ · 04_Archive/",
+        useful_for=("Photos", "Videos", "Documents", "Other"),
+    ),
+    LayoutPreset(
+        id="para",
+        name="PARA (Areas / Resources / Archives)",
+        description="PARA-inspired: Areas for ongoing life categories, Resources for reference, Archives for finished/old.",
+        example="2_Areas/Media/ · 2_Areas/Documents/ · 3_Resources/ · 4_Archives/",
+        useful_for=("Photos", "Documents", "Other"),
+    ),
+    LayoutPreset(
+        id="active_archive",
+        name="Active vs Archive",
+        description="Keep recent files under Active/; older files under Archive/ (age threshold configurable).",
+        example="Active/Photos/ · Archive/Documents/",
+        useful_for=("Photos", "Videos", "Documents", "Other"),
+    ),
+    LayoutPreset(
+        id="by_type",
+        name="By type only",
+        description="Simple folders by category — no year/month subfolders.",
+        example="Photos/ · Videos/ · Documents/ · Audio/ · Other/",
+        useful_for=("Photos", "Videos", "Documents", "Audio", "Archives", "Other"),
+    ),
+    LayoutPreset(
+        id="by_year_month",
+        name="By year / month",
+        description="Everything sorted by date first, then category inside each month.",
+        example="2022/07/Photos/ · 2022/07/Documents/",
+        useful_for=("Photos", "Videos", "Audio"),
+    ),
+    LayoutPreset(
+        id="by_extension",
+        name="By file extension",
+        description="One folder per extension (jpg, pdf, mp4, dng, …).",
+        example="jpg/ · pdf/ · mp4/ · dng/",
+        useful_for=("Documents", "Other", "Photos"),
+    ),
+    LayoutPreset(
+        id="media_library",
+        name="Media library",
+        description="Media by date; documents and other files kept separate.",
+        example="Photos/YYYY/MM/ · Videos/YYYY/MM/ · Documents/ · Other/",
+        useful_for=("Photos", "Videos", "Audio"),
+    ),
+    LayoutPreset(
+        id="documents_first",
+        name="Documents first",
+        description="Documents sorted by type; everything else under Media or Other.",
+        example="Documents/pdf/ · Media/Photos/ · Other/",
+        useful_for=("Documents",),
+    ),
+    LayoutPreset(
+        id="custom",
+        name="Custom structure (you define folders)",
+        description="Type your own folder tree and mapping rules (category → path).",
+        example="Photos = MyArchive/Photos/{year}/{month}",
+        useful_for=(),
+    ),
+]
+
+
+ALL_CATEGORIES = ("Photos", "Videos", "Audio", "Documents", "Archives", "Other")
+
+
+@dataclass
+class OrganiseOptions:
+    """Extra choices: categories, subfolders, and archive best-practice options."""
+
+    categories: Optional[set[str]] = None  # None = all categories
+    media_by_date: bool = True
+    documents_by_ext: bool = True
+    separate_archives: bool = True
+    # Best-practice options from digital organisation guides
+    copy_instead_of_move: bool = True  # safer default for archives
+    rename_with_date_prefix: bool = False
+    sanitize_filenames: bool = True
+    add_readme_notes: bool = True
+    archive_older_than_days: int = 365  # for active_archive layout
+    custom_structure_text: str = ""  # used when layout_id == "custom"
+
+
+def get_layout(layout_id: str) -> LayoutPreset:
+    for preset in LAYOUT_PRESETS:
+        if preset.id == layout_id:
+            return preset
+    return LAYOUT_PRESETS[0]
+
+
+def category_counts(files: list[FileInfo]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for info in files:
+        counts[info.category] = counts.get(info.category, 0) + 1
+    return counts
+
+
+def recommended_layout_ids(files: list[FileInfo]) -> list[str]:
+    """
+    Suggest layouts that fit what was found in the scan.
+    First item is the best default.
+    """
+    counts = category_counts(files)
+    if not counts:
+        return ["type_date"]
+
+    total = sum(counts.values())
+    photos = counts.get("Photos", 0)
+    videos = counts.get("Videos", 0)
+    audio = counts.get("Audio", 0)
+    docs = counts.get("Documents", 0)
+    media = photos + videos + audio
+
+    ranked: list[str] = []
+
+    if media / total >= 0.6 and docs / total <= 0.25:
+        ranked.extend(["media_library", "life_areas", "type_date", "by_year_month", "active_archive"])
+    elif docs / total >= 0.5:
+        ranked.extend(["life_areas", "documents_first", "para", "by_extension", "type_date"])
+    elif len(counts) >= 3:
+        ranked.extend(["life_areas", "type_date", "para", "active_archive", "by_type"])
+    else:
+        ranked.extend(["by_type", "life_areas", "type_date", "by_extension"])
+
+    # Always offer all presets; recommended ones stay at the front
+    for preset in LAYOUT_PRESETS:
+        if preset.id not in ranked:
+            ranked.append(preset.id)
+    return ranked
 
 
 def _year_month(modified: float) -> tuple[str, str]:
@@ -29,27 +193,124 @@ def _year_month(modified: float) -> tuple[str, str]:
     return f"{dt.year:04d}", f"{dt.month:02d}"
 
 
-def suggest_destination(info: FileInfo, dest_root: Path) -> Path:
+def suggest_destination(
+    info: FileInfo,
+    dest_root: Path,
+    layout_id: str = "type_date",
+    options: Optional[OrganiseOptions] = None,
+) -> Path:
     """
-    Build a tidy destination path, for example:
-    Dest/Photos/2022/07/holiday.jpg
-    Dest/Documents/pdf/report.pdf
+    Build a destination path for one file using the chosen layout preset
+    and sub-folder options.
     """
+    opts = options or OrganiseOptions()
     category = info.category
-    name = info.path.name
+    name = apply_naming(
+        info.path.name,
+        info.modified,
+        date_prefix=opts.rename_with_date_prefix,
+        sanitize=opts.sanitize_filenames,
+    )
+    ext = Path(name).suffix.lower().lstrip(".") or "unknown"
+    year, month = _year_month(info.modified)
+    age_days = (datetime.now().timestamp() - info.modified) / 86400.0
 
+    def media_path(base: Path) -> Path:
+        if opts.media_by_date:
+            return base / year / month / name
+        return base / name
+
+    def docs_path(base: Path) -> Path:
+        if opts.documents_by_ext:
+            return base / ext / name
+        return base / name
+
+    def archives_or_other(cat: str) -> Path:
+        if cat == "Archives" and opts.separate_archives:
+            return dest_root / "Archives" / name
+        if cat == "Archives" and not opts.separate_archives:
+            return dest_root / "Other" / name
+        return dest_root / "Other" / name
+
+    # --- User-defined custom folder tree ---
+    if layout_id == "custom":
+        structure = parse_custom_structure(opts.custom_structure_text or "")
+        return custom_destination(info, dest_root, structure, name)
+
+    # --- Best-practice life-area / PARA / active-archive layouts ---
+    if layout_id == "life_areas":
+        if category in ("Photos", "Videos", "Audio"):
+            return media_path(dest_root / "02_Media" / category)
+        if category == "Documents" and looks_financial(info.path.name):
+            return docs_path(dest_root / "03_Finance" / "Documents")
+        if category == "Documents":
+            return docs_path(dest_root / "01_Personal" / "Documents")
+        if category == "Archives" or age_days > opts.archive_older_than_days:
+            return dest_root / "04_Archive" / category / name
+        return dest_root / "01_Personal" / "Other" / name
+
+    if layout_id == "para":
+        # PARA-inspired personal archive (Projects left as inbox for manual use)
+        if age_days > opts.archive_older_than_days or category == "Archives":
+            return dest_root / "4_Archives" / category / name
+        if category in ("Photos", "Videos", "Audio"):
+            return media_path(dest_root / "2_Areas" / "Media" / category)
+        if category == "Documents":
+            return docs_path(dest_root / "2_Areas" / "Documents")
+        return dest_root / "3_Resources" / category / name
+
+    if layout_id == "active_archive":
+        bucket = "Archive" if age_days > opts.archive_older_than_days else "Active"
+        if category in ("Photos", "Videos", "Audio"):
+            return media_path(dest_root / bucket / category)
+        if category == "Documents":
+            return docs_path(dest_root / bucket / "Documents")
+        return dest_root / bucket / category / name
+
+    if layout_id == "by_type":
+        if category == "Documents":
+            return docs_path(dest_root / "Documents")
+        if category == "Archives":
+            return archives_or_other(category)
+        if category in ("Photos", "Videos", "Audio") and opts.media_by_date:
+            return media_path(dest_root / category)
+        return dest_root / category / name
+
+    if layout_id == "by_year_month":
+        # Date first; category still used inside the month
+        if category == "Documents":
+            if opts.documents_by_ext:
+                return dest_root / year / month / "Documents" / ext / name
+            return dest_root / year / month / "Documents" / name
+        if category == "Archives":
+            if opts.separate_archives:
+                return dest_root / year / month / "Archives" / name
+            return dest_root / year / month / "Other" / name
+        return dest_root / year / month / category / name
+
+    if layout_id == "by_extension":
+        return dest_root / ext / name
+
+    if layout_id == "media_library":
+        if category in ("Photos", "Videos", "Audio"):
+            return media_path(dest_root / category)
+        if category == "Documents":
+            return docs_path(dest_root / "Documents")
+        return archives_or_other(category)
+
+    if layout_id == "documents_first":
+        if category == "Documents":
+            return docs_path(dest_root / "Documents")
+        if category in ("Photos", "Videos", "Audio"):
+            return media_path(dest_root / "Media" / category)
+        return archives_or_other(category)
+
+    # Default: type_date
     if category in ("Photos", "Videos", "Audio"):
-        year, month = _year_month(info.modified)
-        return dest_root / category / year / month / name
-
+        return media_path(dest_root / category)
     if category == "Documents":
-        ext = info.path.suffix.lower().lstrip(".") or "unknown"
-        return dest_root / "Documents" / ext / name
-
-    if category == "Archives":
-        return dest_root / "Archives" / name
-
-    return dest_root / "Other" / name
+        return docs_path(dest_root / "Documents")
+    return archives_or_other(category)
 
 
 def unique_path(path: Path) -> Path:
@@ -67,25 +328,44 @@ def unique_path(path: Path) -> Path:
         counter += 1
 
 
+def _is_under_quarantine(path: Path) -> bool:
+    return DEFAULT_QUARANTINE_NAME in path.parts
+
+
 def build_organise_plan(
     files: list[FileInfo],
     dest_root: str,
+    layout_id: str = "type_date",
     only_categories: Optional[set[str]] = None,
+    options: Optional[OrganiseOptions] = None,
 ) -> OrganisePlan:
     """
     Create a plan of moves. Does not change any files yet.
-    Skips files that are already under the destination root.
+    Skips files already under the destination root, and quarantine files.
     """
-    plan = OrganisePlan()
+    opts = options or OrganiseOptions(categories=only_categories)
+    if only_categories is not None and opts.categories is None:
+        opts.categories = only_categories
+
+    preset = get_layout(layout_id)
+    plan = OrganisePlan(layout_id=preset.id, layout_name=preset.name)
     dest = Path(dest_root).expanduser().resolve()
 
     for info in files:
-        if only_categories and info.category not in only_categories:
+        if opts.categories is not None and info.category not in opts.categories:
+            continue
+        # Organise acts on real disk files; zip members are for scan/duplicates only
+        if info.is_inside_archive:
+            plan.skipped.append(f"Inside archive (organise the .zip itself): {info.display_path}")
             continue
         try:
             current = info.path.resolve()
         except OSError:
             plan.skipped.append(f"Could not resolve: {info.path}")
+            continue
+
+        if _is_under_quarantine(current):
+            plan.skipped.append(f"In quarantine (left alone): {current}")
             continue
 
         # Do not move files that are already inside the destination tree
@@ -96,7 +376,11 @@ def build_organise_plan(
         except ValueError:
             pass
 
-        suggested = suggest_destination(info, dest)
+        if not current.exists():
+            plan.skipped.append(f"Missing on disk: {current}")
+            continue
+
+        suggested = suggest_destination(info, dest, layout_id=preset.id, options=opts)
         plan.items.append(
             OrganisePlanItem(
                 source=current,
@@ -107,28 +391,171 @@ def build_organise_plan(
     return plan
 
 
+def layout_tree_text(
+    files: list[FileInfo],
+    dest_root: str,
+    layout_id: str,
+    options: Optional[OrganiseOptions] = None,
+    max_folders: int = 100,
+) -> str:
+    """
+    Build a visual folder-tree preview of the selected layout
+    using the real scanned files (folder paths only).
+    """
+    preset = get_layout(layout_id)
+    opts = options or OrganiseOptions()
+    display_root = dest_root.strip() if dest_root.strip() else "Destination"
+    placeholder = Path("/__preview__")
+
+    if layout_id == "custom":
+        structure = parse_custom_structure(opts.custom_structure_text or "")
+        header = custom_tree_preview(structure, display_root)
+        if not files or not structure.rules:
+            return header
+        # Continue to append implied folders from the scan below
+        custom_header = header + "\n\nFolders your rules create for this scan:\n"
+    else:
+        custom_header = ""
+
+    folder_paths: set[Path] = set()
+    included = 0
+    for info in files:
+        if opts.categories is not None and info.category not in opts.categories:
+            continue
+        # Skip zip members for organise destination plans (organise the zip as a whole)
+        if info.is_inside_archive:
+            continue
+        suggested = suggest_destination(info, placeholder, layout_id=layout_id, options=opts)
+        rel = suggested.parent.relative_to(placeholder)
+        if str(rel) == ".":
+            continue
+        parts = rel.parts
+        for i in range(1, len(parts) + 1):
+            folder_paths.add(Path(*parts[:i]))
+        included += 1
+
+    lines = [
+        f"Layout: {preset.name}",
+        f"Files included: {included}",
+        "",
+        f"{display_root}/",
+    ]
+    if custom_header:
+        lines = custom_header.splitlines() + ["", f"{display_root}/"]
+    if not folder_paths:
+        lines.append("  (no folders — scan files and tick categories)")
+        return "\n".join(lines)
+
+    # Render as a nested tree with box-drawing characters
+    sorted_folders = sorted(folder_paths, key=lambda p: [x.lower() for x in p.parts])
+    shown = sorted_folders[:max_folders]
+
+    # Group by whether each node is the last among siblings for nicer tree (simple indent version)
+    for folder in shown:
+        depth = len(folder.parts)
+        indent = "    " * (depth - 1) + "├── "
+        lines.append(f"{indent}{folder.name}/")
+    if len(sorted_folders) > max_folders:
+        lines.append(f"    … and {len(sorted_folders) - max_folders} more folders")
+    lines.append("")
+    lines.append(f"Pattern: {preset.example}")
+    return "\n".join(lines)
+
+
 def apply_organise_plan(
     plan: OrganisePlan,
     dry_run: bool = True,
     status_cb: Optional[Callable[[str], None]] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
+    options: Optional[OrganiseOptions] = None,
+    dest_root: Optional[str] = None,
 ) -> list[str]:
     """
     Carry out the organise plan.
     dry_run=True means only describe what would happen (safe default).
+    Prefer copy_instead_of_move (archive best practice) when options say so.
     """
+    opts = options or OrganiseOptions()
+    mode_tag = "copy" if opts.copy_instead_of_move else "move"
     log: list[str] = []
-    for item in plan.items:
+    total = len(plan.items)
+    written_dests: list[Path] = []
+
+    for index, item in enumerate(plan.items, start=1):
+        if should_cancel and should_cancel():
+            log.append("[cancelled] Organise stopped by user.")
+            break
         final_dest = unique_path(item.destination) if not dry_run else item.destination
         message = f"{item.source}  →  {final_dest}"
         if dry_run:
-            log.append(f"[preview] {message}")
+            log.append(f"[preview-{mode_tag}] {message}")
             continue
         try:
             final_dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(item.source), str(final_dest))
-            log.append(f"[moved] {message}")
-            if status_cb:
-                status_cb(f"Moved: {item.source.name}")
+            if opts.copy_instead_of_move:
+                shutil.copy2(str(item.source), str(final_dest))
+                log.append(f"[copied] {message}")
+            else:
+                shutil.move(str(item.source), str(final_dest))
+                log.append(f"[moved] {message}")
+            written_dests.append(final_dest)
+            if status_cb and (index == 1 or index % 10 == 0 or index == total):
+                verb = "Copying" if opts.copy_instead_of_move else "Moving"
+                status_cb(f"{verb} files: {index}/{total}")
         except OSError as exc:
             log.append(f"[error] {item.source}: {exc}")
+
+    if not dry_run and opts.add_readme_notes and dest_root and written_dests:
+        try:
+            root = Path(dest_root).expanduser().resolve()
+            children: set[Path] = set()
+            for dest in written_dests:
+                try:
+                    rel = dest.resolve().relative_to(root)
+                    if rel.parts:
+                        children.add(root / rel.parts[0])
+                except ValueError:
+                    continue
+            for folder in sorted(children):
+                note = folder / "README.txt"
+                if not note.exists():
+                    note.write_text(
+                        readme_for_folder(folder.name, plan.layout_name),
+                        encoding="utf-8",
+                    )
+                    log.append(f"[readme] {note}")
+        except OSError as exc:
+            log.append(f"[readme-error] {exc}")
+
     return log
+
+
+def destination_conflicts_with_sources(dest: str, sources: list[str]) -> Optional[str]:
+    """
+    Return a warning message if the destination is the same as,
+    or inside, a scan source (risky).
+    """
+    try:
+        dest_path = Path(dest).expanduser().resolve()
+    except OSError:
+        return None
+    for source in sources:
+        try:
+            source_path = Path(source).expanduser().resolve()
+        except OSError:
+            continue
+        if dest_path == source_path:
+            return (
+                f"Destination is the same as a scan source:\n{dest_path}\n\n"
+                "Choose a different tidy folder so you do not reorganise a source onto itself."
+            )
+        try:
+            dest_path.relative_to(source_path)
+            return (
+                f"Destination is inside a scan source:\n{dest_path}\n"
+                f"(source: {source_path})\n\n"
+                "This can make results confusing. Prefer an empty folder outside your sources."
+            )
+        except ValueError:
+            pass
+    return None

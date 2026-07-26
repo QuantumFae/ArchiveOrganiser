@@ -46,26 +46,28 @@ python3 main.py
 Use a **test folder** with a few copied files first. Learn the buttons before scanning your whole archive.
 
 ### 2. Sources tab
-1. Click **Add folder / drive** for each messy location (HDD, USB, SD mount, or folder).
-2. On Linux, mounts are often under `/media/YOURNAME/` or `/mnt/`.
-3. Click **Scan now** and wait for the status bar to finish.
+1. Click **Add folder / drive** — a file-manager style window opens:
+   - Left: Places (Home, Desktop, …) and mounted drives
+   - Right: folders in the current location
+   - Double-click a folder to open it; use **Up** / **Home** / path bar to navigate
+   - Click **Select this folder** when you are inside the right place
+2. Optionally tick:
+   - **Include junk / system folders** (Trash, System Volume Information, dot-folders, …)
+   - **Scan inside .zip archives** (lists files stored in zips for duplicate checks)
+3. On Linux, external drives often appear under Places as **Drive: …** (from `/media`, `/mnt`, `/run/media`).
+4. Click **Scan now** and wait for the status bar to finish.
 
 ### 3. Overview tab
 - Check counts by category and total size.
 - Optionally click **Save report…** to keep a text summary.
+- Choose duplicate modes: **Exact**, **Similar photos**, **Similar docs**.
 - Click **Find duplicates**.
 
 ### 4. Duplicates tab
-- Left: **every duplicate group** in the full found list.
+- Left: **every duplicate group** (Exact / Photo≈ / Doc≈). Drag the sash to resize panes.
 - Click a group → **side-by-side cards** on the right for each copy.
-- Each card shows:
-  - **Content preview** (images and many text files; other types show info only)
-  - **File information** (path, size, dates, category, KEEP vs copy)
-  - A **checkbox** to select that file
-- Extras are pre-selected; the oldest KEEP file is not.
-- **Quarantine selected** — safe remove (recommended)
-- **Permanently delete selected** — erases from disk after **two** confirmations
-- **Quarantine all extras (every group)** — clears extras across the whole list at once
+- Photos match by **similar name** and/or **similar look**; documents by **name** and/or **text content**.
+- Files inside zips can be compared; quarantine applies to real disk files only.
 
 Quarantined files go to:
 
@@ -74,22 +76,13 @@ Quarantined files go to:
 Each session includes a `manifest.json` listing original paths. Restore by moving files back manually.
 
 ### 5. Organise tab
-1. Choose a **destination** folder (ideally empty / a tidy drive).
-2. Keep **Dry run only** ticked and click **Preview plan**.
-3. Read the planned moves.
-4. When ready, untick Dry run and click **Apply moves**.
-
-Suggested layout:
-
-```text
-Destination/
-  Photos/YYYY/MM/
-  Videos/YYYY/MM/
-  Audio/YYYY/MM/
-  Documents/pdf/  (and other extensions)
-  Archives/
-  Other/
-```
+1. Choose a **destination** folder (ideally empty / a tidy drive, outside your sources).
+2. Pick a **pre-defined folder layout** or **Custom structure** and edit the tree/rules box:
+   - Example rule: `Photos = MyArchive/Photos/{year}/{month}`
+   - Placeholders: `{year}` `{month}` `{ext}` `{category}` `{name}`
+3. Drag the **sashes** to resize options, preview, and plan panes.
+4. Keep **Dry run only** ticked → **Preview plan** → **Browse dry-run…** (file-manager view of the plan).
+5. When ready, untick Dry run and click **Apply organise**.
 
 ---
 
@@ -98,9 +91,10 @@ Destination/
 | Do | Don’t |
 |----|--------|
 | Preview / dry run first | Permanently delete until you trust the results |
-| Quarantine duplicates | Point organise destination at a source drive by accident without checking the plan |
-| Keep originals until you verify | Unplug a drive mid-scan / mid-move |
-| Re-scan after big changes | Assume same filename = same file (this app checks content) |
+| Prefer **Copy** when building an archive | Point organise destination at a source drive by accident without checking the plan |
+| Quarantine duplicates | Unplug a drive mid-scan / mid-copy |
+| Keep originals until you verify copies | Assume same filename = same file (this app checks content) |
+| Re-scan after big changes | Nest folders endlessly — keep trees shallow |
 
 ---
 
