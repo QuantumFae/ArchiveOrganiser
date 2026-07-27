@@ -54,6 +54,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "scan_zips": False,
     "copy_instead_of_move": True,
     "dry_run": True,
+    "media_date_depth": "year_month",
+    "documents_by_ext": True,
+    "separate_archives": True,
+    "category_subfolders": {},
+    "rename_with_date_prefix": False,
+    "sanitize_filenames": True,
+    "add_readme_notes": True,
+    "archive_older_than_days": 365,
+    "custom_structure_text": "",
     "last_quarantine_session": "",
     "last_scan_db": "",
 }
@@ -71,6 +80,15 @@ def load_settings() -> dict[str, Any]:
             for key, value in raw.items():
                 if key in DEFAULT_SETTINGS:
                     data[key] = value
+            # Migrate legacy media_by_date bool → media_date_depth
+            if "media_date_depth" not in raw and "media_by_date" in raw:
+                legacy = raw.get("media_by_date")
+                if isinstance(legacy, bool):
+                    data["media_date_depth"] = "year_month" if legacy else "none"
+                else:
+                    data["media_date_depth"] = "year_month"
+            if not isinstance(data.get("category_subfolders"), dict):
+                data["category_subfolders"] = {}
     except (OSError, json.JSONDecodeError, TypeError):
         pass
     return data

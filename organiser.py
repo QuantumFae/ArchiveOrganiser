@@ -112,6 +112,20 @@ LAYOUT_PRESETS: list[LayoutPreset] = [
         useful_for=("Documents",),
     ),
     LayoutPreset(
+        id="by_source_root",
+        name="Keep source folders",
+        description="Preserve each file’s path under its source root name (DriveName/…/file).",
+        example="USB_Stick/Vacation/img.jpg · HDD/Docs/report.pdf",
+        useful_for=("Photos", "Videos", "Documents", "Other"),
+    ),
+    LayoutPreset(
+        id="shallow_by_type",
+        name="Shallow by type",
+        description="Category folders only — no year/month or extension nesting.",
+        example="Photos/ · Videos/ · Documents/ · Other/",
+        useful_for=("Photos", "Videos", "Documents", "Audio", "Archives", "Other"),
+    ),
+    LayoutPreset(
         id="custom",
         name="Custom structure (you define folders)",
         description="Type your own folder tree and mapping rules (category → path).",
@@ -123,15 +137,44 @@ LAYOUT_PRESETS: list[LayoutPreset] = [
 
 ALL_CATEGORIES = ("Photos", "Videos", "Audio", "Documents", "Archives", "Other")
 
+# Per-category nesting modes (advanced Organise options)
+CATEGORY_SUBFOLDER_MODES = (
+    "layout_default",
+    "flat",
+    "year",
+    "year_month",
+    "extension",
+)
+
+MEDIA_DATE_DEPTHS = ("none", "year", "year_month")
+
+CATEGORY_MODE_LABELS = {
+    "layout_default": "Follow layout",
+    "flat": "Flat",
+    "year": "By year",
+    "year_month": "By year + month",
+    "extension": "By extension",
+}
+
+MEDIA_DATE_DEPTH_LABELS = {
+    "none": "None (flat)",
+    "year": "Year only",
+    "year_month": "Year + month",
+}
+
 
 @dataclass
 class OrganiseOptions:
     """Extra choices: categories, subfolders, and archive best-practice options."""
 
     categories: Optional[set[str]] = None  # None = all categories
-    media_by_date: bool = True
+    # Media date nesting: none | year | year_month
+    media_date_depth: str = "year_month"
     documents_by_ext: bool = True
     separate_archives: bool = True
+    # Per-category override of nesting under the layout’s category folder
+    category_subfolders: dict[str, str] = field(default_factory=dict)
+    unknown_extension_folder: str = "unknown"
     # Best-practice options from digital organisation guides
     copy_instead_of_move: bool = True  # safer default for archives
     rename_with_date_prefix: bool = False
@@ -139,6 +182,11 @@ class OrganiseOptions:
     add_readme_notes: bool = True
     archive_older_than_days: int = 365  # for active_archive layout
     custom_structure_text: str = ""  # used when layout_id == "custom"
+
+    @property
+    def media_by_date(self) -> bool:
+        """True when media files get any date nesting (year or year+month)."""
+        return self.media_date_depth != "none"
 
 
 def get_layout(layout_id: str) -> LayoutPreset:
@@ -175,6 +223,42 @@ def layout_combo_label(layout_ids: list[str]) -> str:
     if len(names) == 1:
         return names[0]
     return " + ".join(names)
+
+
+def layout_combine_order_label(layout_ids: list[str]) -> str:
+    """Human-readable combine order for the Organise UI."""
+    ids = normalize_layout_ids(layout_ids)
+    names = [get_layout(i).name for i in ids]
+    if len(names) == 1:
+        return f"Combine order: {names[0]}"
+    return "Combine order: " + " → ".join(names)
+
+
+def normalize_media_date_depth(value: object, fallback: str = "year_month") -> str:
+    """Accept new depth strings or legacy bool-like values."""
+    if isinstance(value, bool):
+        return "year_month" if value else "none"
+    text = str(value or "").strip().lower()
+    if text in ("true", "1", "yes"):
+        return "year_month"
+    if text in ("false", "0", "no"):
+        return "none"
+    if text in MEDIA_DATE_DEPTHS:
+        return text
+    return fallback if fallback in MEDIA_DATE_DEPTHS else "year_month"
+
+
+def normalize_category_subfolders(raw: object) -> dict[str, str]:
+    """Clean a per-category mode map from settings or UI."""
+    out: dict[str, str] = {}
+    if not isinstance(raw, dict):
+        return out
+    for cat in ALL_CATEGORIES:
+        mode = str(raw.get(cat, "layout_default") or "layout_default")
+        if mode not in CATEGORY_SUBFOLDER_MODES:
+            mode = "layout_default"
+        out[cat] = mode
+    return out
 
 
 def suggest_destination_combined(
@@ -278,31 +362,84 @@ def suggest_destination(
         date_prefix=opts.rename_with_date_prefix,
         sanitize=opts.sanitize_filenames,
     )
-    ext = Path(name).suffix.lower().lstrip(".") or "unknown"
+    unknown = (opts.unknown_extension_folder or "unknown").strip() or "unknown"
+    ext = Path(name).suffix.lower().lstrip(".") or unknown
     year, month = _year_month(info.modified)
     age_days = (datetime.now().timestamp() - info.modified) / 86400.0
+    depth = normalize_media_date_depth(opts.media_date_depth)
+    cat_modes = normalize_category_subfolders(opts.category_subfolders)
+    cat_mode = cat_modes.get(category, "layout_default")
 
-    def media_path(base: Path) -> Path:
-        if opts.media_by_date:
+    def _with_depth(base: Path, use_depth: str) -> Path:
+        if use_depth == "year_month":
             return base / year / month / name
+        if use_depth == "year":
+            return base / year / name
         return base / name
 
-    def docs_path(base: Path) -> Path:
-        if opts.documents_by_ext:
+    def nest_under(base: Path, default_kind: str) -> Path:
+        """
+        Put the file under base using layout defaults, unless a per-category
+        override is set (flat / year / year_month / extension).
+        default_kind: media | docs | flat
+        """
+        mode = cat_mode
+        if mode == "layout_default":
+            if default_kind == "media":
+                return _with_depth(base, depth)
+            if default_kind == "docs":
+                if opts.documents_by_ext:
+                    return base / ext / name
+                return base / name
+            return base / name
+        if mode == "flat":
+            return base / name
+        if mode == "year":
+            return base / year / name
+        if mode == "year_month":
+            return base / year / month / name
+        if mode == "extension":
             return base / ext / name
         return base / name
 
+    def media_path(base: Path) -> Path:
+        return nest_under(base, "media")
+
+    def docs_path(base: Path) -> Path:
+        return nest_under(base, "docs")
+
+    def flat_path(base: Path) -> Path:
+        return nest_under(base, "flat")
+
     def archives_or_other(cat: str) -> Path:
         if cat == "Archives" and opts.separate_archives:
-            return dest_root / "Archives" / name
+            return flat_path(dest_root / "Archives")
         if cat == "Archives" and not opts.separate_archives:
-            return dest_root / "Other" / name
-        return dest_root / "Other" / name
+            return flat_path(dest_root / "Other")
+        return flat_path(dest_root / "Other")
 
     # --- User-defined custom folder tree ---
     if layout_id == "custom":
         structure = parse_custom_structure(opts.custom_structure_text or "")
         return custom_destination(info, dest_root, structure, name)
+
+    # --- Keep relative path under each source root name ---
+    if layout_id == "by_source_root":
+        root_label = Path(info.source_root).name if info.source_root else "Source"
+        try:
+            src_root = Path(info.source_root).expanduser().resolve()
+            rel = info.path.resolve().relative_to(src_root)
+            if len(rel.parts) <= 1:
+                return dest_root / root_label / name
+            return dest_root / root_label / Path(*rel.parts[:-1]) / name
+        except (OSError, ValueError):
+            return flat_path(dest_root / root_label / category)
+
+    # --- Category only (always shallow) ---
+    if layout_id == "shallow_by_type":
+        if category == "Archives" and not opts.separate_archives:
+            return dest_root / "Other" / name
+        return dest_root / category / name
 
     # --- Best-practice life-area / PARA / active-archive layouts ---
     if layout_id == "life_areas":
@@ -313,18 +450,18 @@ def suggest_destination(
         if category == "Documents":
             return docs_path(dest_root / "01_Personal" / "Documents")
         if category == "Archives" or age_days > opts.archive_older_than_days:
-            return dest_root / "04_Archive" / category / name
-        return dest_root / "01_Personal" / "Other" / name
+            return flat_path(dest_root / "04_Archive" / category)
+        return flat_path(dest_root / "01_Personal" / "Other")
 
     if layout_id == "para":
         # PARA-inspired personal archive (Projects left as inbox for manual use)
         if age_days > opts.archive_older_than_days or category == "Archives":
-            return dest_root / "4_Archives" / category / name
+            return flat_path(dest_root / "4_Archives" / category)
         if category in ("Photos", "Videos", "Audio"):
             return media_path(dest_root / "2_Areas" / "Media" / category)
         if category == "Documents":
             return docs_path(dest_root / "2_Areas" / "Documents")
-        return dest_root / "3_Resources" / category / name
+        return flat_path(dest_root / "3_Resources" / category)
 
     if layout_id == "active_archive":
         bucket = "Archive" if age_days > opts.archive_older_than_days else "Active"
@@ -332,28 +469,26 @@ def suggest_destination(
             return media_path(dest_root / bucket / category)
         if category == "Documents":
             return docs_path(dest_root / bucket / "Documents")
-        return dest_root / bucket / category / name
+        return flat_path(dest_root / bucket / category)
 
     if layout_id == "by_type":
         if category == "Documents":
             return docs_path(dest_root / "Documents")
         if category == "Archives":
             return archives_or_other(category)
-        if category in ("Photos", "Videos", "Audio") and opts.media_by_date:
+        if category in ("Photos", "Videos", "Audio"):
             return media_path(dest_root / category)
-        return dest_root / category / name
+        return flat_path(dest_root / category)
 
     if layout_id == "by_year_month":
         # Date first; category still used inside the month
         if category == "Documents":
-            if opts.documents_by_ext:
-                return dest_root / year / month / "Documents" / ext / name
-            return dest_root / year / month / "Documents" / name
+            return nest_under(dest_root / year / month / "Documents", "docs")
         if category == "Archives":
             if opts.separate_archives:
-                return dest_root / year / month / "Archives" / name
-            return dest_root / year / month / "Other" / name
-        return dest_root / year / month / category / name
+                return nest_under(dest_root / year / month / "Archives", "flat")
+            return nest_under(dest_root / year / month / "Other", "flat")
+        return nest_under(dest_root / year / month / category, "flat")
 
     if layout_id == "by_extension":
         return dest_root / ext / name

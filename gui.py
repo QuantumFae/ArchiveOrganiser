@@ -43,14 +43,21 @@ from ctk_theme import (
 )
 from organiser import (
     ALL_CATEGORIES,
+    CATEGORY_MODE_LABELS,
+    CATEGORY_SUBFOLDER_MODES,
     LAYOUT_PRESETS,
+    MEDIA_DATE_DEPTH_LABELS,
+    MEDIA_DATE_DEPTHS,
     OrganiseOptions,
     apply_organise_plan,
     build_organise_plan,
     destination_conflicts_with_sources,
     get_layout,
+    layout_combine_order_label,
     layout_combo_label,
     layout_tree_text,
+    normalize_category_subfolders,
+    normalize_media_date_depth,
     recommended_layout_ids,
 )
 from plan_browser import PlanBrowserWindow
@@ -1150,7 +1157,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         hpaned.add(left, minsize=260)
         hpaned.add(right, minsize=260)
         left.grid_columnconfigure(0, weight=1)
-        left.grid_rowconfigure(2, weight=1)
+        left.grid_rowconfigure(3, weight=1)
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(1, weight=1)
 
@@ -1165,16 +1172,44 @@ class ArchiveOrganiserApp(ctk.CTk):
             font=ctk.CTkFont(size=11),
             text_color=("gray40", "gray70"),
         )
-        self.layout_hint.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 4))
+        self.layout_hint.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 2))
+
+        layout_tools = ctk.CTkFrame(left, fg_color="transparent")
+        layout_tools.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 4))
+        ctk.CTkButton(
+            layout_tools,
+            text="Use recommended",
+            width=130,
+            height=26,
+            command=self._use_recommended_layouts,
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            layout_tools,
+            text="Clear to one",
+            width=100,
+            height=26,
+            command=self._clear_layouts_to_one,
+        ).pack(side="left")
 
         self.layout_vars: dict[str, tk.BooleanVar] = {}
-        self.layout_check_frame = ctk.CTkScrollableFrame(left, height=140)
-        self.layout_check_frame.grid(row=2, column=0, sticky="nsew", padx=6, pady=(0, 4))
+        self.layout_check_frame = ctk.CTkScrollableFrame(left, height=220)
+        self.layout_check_frame.grid(row=3, column=0, sticky="nsew", padx=6, pady=(0, 2))
         self.layout_check_frame.grid_columnconfigure(0, weight=1)
-        self._layout_check_widgets: list[ctk.CTkCheckBox] = []
+        self._layout_check_widgets: list = []
+        self._layout_recommended_ids: list[str] = ["type_date"]
+
+        self.layout_combine_label = ctk.CTkLabel(
+            left,
+            text="Combine order: Type + date",
+            justify="left",
+            anchor="w",
+            font=ctk.CTkFont(size=11),
+            text_color=MUTED,
+        )
+        self.layout_combine_label.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 4))
 
         safety = ctk.CTkFrame(left, fg_color="transparent")
-        safety.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 4))
+        safety.grid(row=5, column=0, sticky="ew", padx=8, pady=(0, 4))
         self.copy_instead_var = tk.BooleanVar(
             value=bool(self._settings.get("copy_instead_of_move", True))
         )
@@ -1193,7 +1228,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         ).pack(anchor="w", pady=(4, 0))
 
         # Category include + sub-folder options (collapsed by default)
-        opts = ctk.CTkScrollableFrame(left, height=220)
+        opts = ctk.CTkScrollableFrame(left, height=260)
         self.organise_advanced_frame = opts
         opts.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
@@ -1217,15 +1252,34 @@ class ArchiveOrganiserApp(ctk.CTk):
         ctk.CTkLabel(
             opts, text="Sub-folder options", font=ctk.CTkFont(size=12, weight="bold")
         ).grid(row=2, column=0, sticky="w", padx=6, pady=(8, 2))
-        self.media_by_date_var = tk.BooleanVar(value=True)
-        self.documents_by_ext_var = tk.BooleanVar(value=True)
-        self.separate_archives_var = tk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
-            opts,
-            text="Media: year / month subfolders",
-            variable=self.media_by_date_var,
-            command=self._update_layout_visual,
-        ).grid(row=3, column=0, sticky="w", padx=8, pady=2)
+
+        saved_depth = normalize_media_date_depth(
+            self._settings.get("media_date_depth", self._settings.get("media_by_date", True))
+        )
+        self._media_depth_label_to_value = {
+            MEDIA_DATE_DEPTH_LABELS[k]: k for k in MEDIA_DATE_DEPTHS
+        }
+        self._media_depth_value_to_label = dict(MEDIA_DATE_DEPTH_LABELS)
+        self.media_date_depth_var = tk.StringVar(
+            value=self._media_depth_value_to_label.get(saved_depth, MEDIA_DATE_DEPTH_LABELS["year_month"])
+        )
+        depth_row = ctk.CTkFrame(opts, fg_color="transparent")
+        depth_row.grid(row=3, column=0, sticky="ew", padx=8, pady=2)
+        ctk.CTkLabel(depth_row, text="Media date folders:").pack(side="left")
+        ctk.CTkOptionMenu(
+            depth_row,
+            values=[MEDIA_DATE_DEPTH_LABELS[k] for k in MEDIA_DATE_DEPTHS],
+            variable=self.media_date_depth_var,
+            width=140,
+            command=lambda _v: self._update_layout_visual(),
+        ).pack(side="left", padx=(8, 0))
+
+        self.documents_by_ext_var = tk.BooleanVar(
+            value=bool(self._settings.get("documents_by_ext", True))
+        )
+        self.separate_archives_var = tk.BooleanVar(
+            value=bool(self._settings.get("separate_archives", True))
+        )
         ctk.CTkCheckBox(
             opts,
             text="Documents: subfolder per extension (pdf, docx, …)",
@@ -1241,39 +1295,92 @@ class ArchiveOrganiserApp(ctk.CTk):
 
         ctk.CTkLabel(
             opts,
-            text="Archive best practices",
+            text="Per-category folders",
             font=ctk.CTkFont(size=12, weight="bold"),
         ).grid(row=6, column=0, sticky="w", padx=6, pady=(8, 2))
-        self.date_prefix_var = tk.BooleanVar(value=False)
-        self.sanitize_names_var = tk.BooleanVar(value=True)
-        self.readme_notes_var = tk.BooleanVar(value=True)
-        self.archive_days_var = tk.StringVar(value="365")
+        ctk.CTkLabel(
+            opts,
+            text="Override nesting for one category (optional). Follow layout = use the preset.",
+            font=ctk.CTkFont(size=11),
+            text_color=MUTED,
+            justify="left",
+            anchor="w",
+        ).grid(row=7, column=0, sticky="ew", padx=8, pady=(0, 2))
+
+        saved_modes = normalize_category_subfolders(
+            self._settings.get("category_subfolders") or {}
+        )
+        self._category_mode_label_to_value = {
+            CATEGORY_MODE_LABELS[k]: k for k in CATEGORY_SUBFOLDER_MODES
+        }
+        self._category_mode_value_to_label = dict(CATEGORY_MODE_LABELS)
+        self.category_mode_vars: dict[str, tk.StringVar] = {}
+        cat_mode_frame = ctk.CTkFrame(opts, fg_color="transparent")
+        cat_mode_frame.grid(row=8, column=0, sticky="ew", padx=6, pady=(0, 4))
+        cat_mode_frame.grid_columnconfigure(1, weight=1)
+        mode_labels = [CATEGORY_MODE_LABELS[k] for k in CATEGORY_SUBFOLDER_MODES]
+        for row_i, cat in enumerate(ALL_CATEGORIES):
+            mode_val = saved_modes.get(cat, "layout_default")
+            var = tk.StringVar(
+                value=self._category_mode_value_to_label.get(
+                    mode_val, CATEGORY_MODE_LABELS["layout_default"]
+                )
+            )
+            self.category_mode_vars[cat] = var
+            ctk.CTkLabel(cat_mode_frame, text=f"{cat}:", width=80, anchor="w").grid(
+                row=row_i, column=0, sticky="w", padx=(2, 6), pady=2
+            )
+            ctk.CTkOptionMenu(
+                cat_mode_frame,
+                values=mode_labels,
+                variable=var,
+                width=150,
+                command=lambda _v: self._update_layout_visual(),
+            ).grid(row=row_i, column=1, sticky="w", pady=2)
+
+        ctk.CTkLabel(
+            opts,
+            text="Archive best practices",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).grid(row=9, column=0, sticky="w", padx=6, pady=(8, 2))
+        self.date_prefix_var = tk.BooleanVar(
+            value=bool(self._settings.get("rename_with_date_prefix", False))
+        )
+        self.sanitize_names_var = tk.BooleanVar(
+            value=bool(self._settings.get("sanitize_filenames", True))
+        )
+        self.readme_notes_var = tk.BooleanVar(
+            value=bool(self._settings.get("add_readme_notes", True))
+        )
+        self.archive_days_var = tk.StringVar(
+            value=str(self._settings.get("archive_older_than_days", 365))
+        )
         ctk.CTkLabel(
             opts,
             text="(Copy vs move is above — kept visible for safety)",
             font=ctk.CTkFont(size=11),
             text_color=MUTED,
-        ).grid(row=7, column=0, sticky="w", padx=8, pady=2)
+        ).grid(row=10, column=0, sticky="w", padx=8, pady=2)
         ctk.CTkCheckBox(
             opts,
             text="Add YYYY-MM-DD date prefix to filenames",
             variable=self.date_prefix_var,
             command=self._update_layout_visual,
-        ).grid(row=8, column=0, sticky="w", padx=8, pady=2)
+        ).grid(row=11, column=0, sticky="w", padx=8, pady=2)
         ctk.CTkCheckBox(
             opts,
             text="Sanitize filenames (safer characters)",
             variable=self.sanitize_names_var,
             command=self._update_layout_visual,
-        ).grid(row=9, column=0, sticky="w", padx=8, pady=2)
+        ).grid(row=12, column=0, sticky="w", padx=8, pady=2)
         ctk.CTkCheckBox(
             opts,
             text="Write README.txt notes in top folders",
             variable=self.readme_notes_var,
             command=self._update_layout_visual,
-        ).grid(row=10, column=0, sticky="w", padx=8, pady=2)
+        ).grid(row=13, column=0, sticky="w", padx=8, pady=2)
         age_row = ctk.CTkFrame(opts, fg_color="transparent")
-        age_row.grid(row=11, column=0, sticky="ew", padx=8, pady=(2, 6))
+        age_row.grid(row=14, column=0, sticky="ew", padx=8, pady=(2, 6))
         ctk.CTkLabel(age_row, text="Archive files older than (days):").pack(side="left")
         age_entry = ctk.CTkEntry(age_row, width=70, textvariable=self.archive_days_var)
         age_entry.pack(side="left", padx=6)
@@ -1283,18 +1390,21 @@ class ArchiveOrganiserApp(ctk.CTk):
             opts,
             text="Custom structure (when layout = Custom)",
             font=ctk.CTkFont(size=12, weight="bold"),
-        ).grid(row=12, column=0, sticky="w", padx=6, pady=(8, 2))
+        ).grid(row=15, column=0, sticky="w", padx=6, pady=(8, 2))
         ctk.CTkLabel(
             opts,
             text="Tree lines + rules like: Photos = MyArchive/Photos/{year}/{month}",
             font=ctk.CTkFont(size=11),
             text_color=("gray40", "gray70"),
-        ).grid(row=13, column=0, sticky="w", padx=8)
+        ).grid(row=16, column=0, sticky="w", padx=8)
         self.custom_structure_box = ctk.CTkTextbox(
             opts, height=110, font=ctk.CTkFont(family="monospace", size=11)
         )
-        self.custom_structure_box.grid(row=14, column=0, sticky="ew", padx=8, pady=(2, 8))
-        self.custom_structure_box.insert("1.0", DEFAULT_CUSTOM_TEMPLATE)
+        self.custom_structure_box.grid(row=17, column=0, sticky="ew", padx=8, pady=(2, 8))
+        saved_custom = str(self._settings.get("custom_structure_text") or "").strip()
+        self.custom_structure_box.insert(
+            "1.0", saved_custom if saved_custom else DEFAULT_CUSTOM_TEMPLATE
+        )
         self.custom_structure_box.bind("<KeyRelease>", lambda _e: self._update_layout_visual())
 
         head = ctk.CTkFrame(right, fg_color="transparent")
@@ -1361,9 +1471,9 @@ class ArchiveOrganiserApp(ctk.CTk):
         if frame is None:
             return
         if self.show_advanced_org_var.get():
-            frame.grid(row=4, column=0, sticky="nsew", padx=6, pady=(0, 6))
+            frame.grid(row=6, column=0, sticky="nsew", padx=6, pady=(0, 6))
             try:
-                frame.master.grid_rowconfigure(4, weight=1)
+                frame.master.grid_rowconfigure(6, weight=1)
             except Exception:
                 pass
         else:
@@ -1376,6 +1486,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._layout_check_widgets.clear()
 
         order = recommended or [p.id for p in LAYOUT_PRESETS]
+        self._layout_recommended_ids = list(order)
         seen: set[str] = set()
         ordered_ids: list[str] = []
         for layout_id in order:
@@ -1403,7 +1514,7 @@ class ArchiveOrganiserApp(ctk.CTk):
             useful = ""
             if recommended and layout_id in recommended[:3] and layout_id != recommended[0]:
                 useful = "  (fits your files)"
-            text = f"{preset.name}{mark}{useful}"
+            title = f"{preset.name}{mark}{useful}"
             if any_prev:
                 default_on = bool(previous.get(layout_id, False))
             elif saved:
@@ -1412,17 +1523,55 @@ class ArchiveOrganiserApp(ctk.CTk):
                 default_on = layout_id == best
             var = tk.BooleanVar(value=default_on)
             self.layout_vars[layout_id] = var
+
+            row = ctk.CTkFrame(self.layout_check_frame, fg_color="transparent")
+            row.grid(row=row_i, column=0, sticky="ew", padx=2, pady=(2, 6))
+            row.grid_columnconfigure(0, weight=1)
             box = ctk.CTkCheckBox(
-                self.layout_check_frame,
-                text=text,
+                row,
+                text=title,
                 variable=var,
+                font=ctk.CTkFont(size=12, weight="bold"),
                 command=self._on_layout_chosen,
             )
-            box.grid(row=row_i, column=0, sticky="w", padx=4, pady=2)
+            box.grid(row=0, column=0, sticky="w")
+            detail = f"{preset.description}\nExample: {preset.example}"
+            ctk.CTkLabel(
+                row,
+                text=detail,
+                justify="left",
+                anchor="w",
+                font=ctk.CTkFont(size=11),
+                text_color=MUTED,
+                wraplength=320,
+            ).grid(row=1, column=0, sticky="ew", padx=(28, 4), pady=(0, 2))
             self._layout_check_widgets.append(box)
 
         if not any(var.get() for var in self.layout_vars.values()):
             self.layout_vars[best].set(True)
+        self._on_layout_chosen()
+
+    def _use_recommended_layouts(self) -> None:
+        """Tick only the top recommended layout (or type_date)."""
+        recommended = self._layout_recommended_ids or ["type_date"]
+        keep = recommended[0] if recommended else "type_date"
+        if keep not in self.layout_vars:
+            keep = next(iter(self.layout_vars), "type_date")
+        for lid, var in self.layout_vars.items():
+            var.set(lid == keep)
+        self._on_layout_chosen()
+
+    def _clear_layouts_to_one(self) -> None:
+        """Keep the first selected layout only (or recommended if none)."""
+        selected = [lid for lid, var in self.layout_vars.items() if var.get()]
+        if selected:
+            keep = selected[0]
+        else:
+            keep = (self._layout_recommended_ids or ["type_date"])[0]
+        if keep not in self.layout_vars:
+            keep = next(iter(self.layout_vars), "type_date")
+        for lid, var in self.layout_vars.items():
+            var.set(lid == keep)
         self._on_layout_chosen()
 
     def _selected_layout_ids(self) -> list[str]:
@@ -1447,8 +1596,26 @@ class ArchiveOrganiserApp(ctk.CTk):
             # Always keep at least one layout
             fallback = "type_date" if "type_date" in self.layout_vars else next(iter(self.layout_vars))
             self.layout_vars[fallback].set(True)
+        if hasattr(self, "layout_combine_label"):
+            self.layout_combine_label.configure(
+                text=layout_combine_order_label(self._selected_layout_ids())
+            )
         self._update_layout_visual()
         self._persist_settings()
+
+    def _selected_media_date_depth(self) -> str:
+        label = self.media_date_depth_var.get() if hasattr(self, "media_date_depth_var") else ""
+        return normalize_media_date_depth(
+            getattr(self, "_media_depth_label_to_value", {}).get(label, label)
+        )
+
+    def _selected_category_subfolders(self) -> dict[str, str]:
+        raw: dict[str, str] = {}
+        mapping = getattr(self, "_category_mode_label_to_value", {})
+        for cat, var in getattr(self, "category_mode_vars", {}).items():
+            label = var.get()
+            raw[cat] = mapping.get(label, "layout_default")
+        return normalize_category_subfolders(raw)
 
     def _current_organise_options(self) -> OrganiseOptions:
         selected = {cat for cat, var in self.category_vars.items() if var.get()}
@@ -1458,9 +1625,10 @@ class ArchiveOrganiserApp(ctk.CTk):
             days = 365
         return OrganiseOptions(
             categories=selected if selected else set(ALL_CATEGORIES),
-            media_by_date=self.media_by_date_var.get(),
+            media_date_depth=self._selected_media_date_depth(),
             documents_by_ext=self.documents_by_ext_var.get(),
             separate_archives=self.separate_archives_var.get(),
+            category_subfolders=self._selected_category_subfolders(),
             copy_instead_of_move=self.copy_instead_var.get(),
             rename_with_date_prefix=self.date_prefix_var.get(),
             sanitize_filenames=self.sanitize_names_var.get(),
@@ -1479,7 +1647,17 @@ class ArchiveOrganiserApp(ctk.CTk):
             files, dest, layout_ids=layout_ids, options=options
         )
         label = layout_combo_label(layout_ids)
+        overrides = [
+            f"{cat}:{mode}"
+            for cat, mode in sorted((options.category_subfolders or {}).items())
+            if mode and mode != "layout_default"
+        ]
+        override_txt = ", ".join(overrides) if overrides else "none"
         flags = (
+            f"Folders: media date={options.media_date_depth} · "
+            f"docs by ext={options.documents_by_ext} · "
+            f"archives separate={options.separate_archives} · "
+            f"category overrides={override_txt}\n"
             f"Practices: copy={options.copy_instead_of_move} · "
             f"date prefix={options.rename_with_date_prefix} · "
             f"sanitize={options.sanitize_filenames} · "
@@ -1557,10 +1735,12 @@ class ArchiveOrganiserApp(ctk.CTk):
 
 4. Organise tab
    • Destination must be outside your scan sources for real copy/move.
-   • Tick one or more folder layouts to combine (folders nest together).
+   • Tick layouts (each shows a short description). Use recommended / Clear to one.
+   • Combine order is shown under the list (folders nest when you tick more than one).
+   • New presets: Keep source folders · Shallow by type.
+   • Advanced: media date depth (none / year / year+month), per-category folder modes,
+     archive age days, and optional Custom structure text.
    • Keep Copy + Dry run on at first. Preview plan, then Apply.
-   • After Preview, the top banner reminds you to Apply.
-   • Advanced / custom options can stay collapsed until you need them.
    • Custom structure cannot mix with other layouts (Custom alone).
 
 LARGE DRIVES (1TB+)
@@ -1711,6 +1891,13 @@ PRIVACY & SAFETY
         layout_ids = []
         if getattr(self, "layout_vars", None):
             layout_ids = [lid for lid, var in self.layout_vars.items() if var.get()]
+        try:
+            archive_days = max(1, int(self.archive_days_var.get().strip() or "365"))
+        except (ValueError, AttributeError):
+            archive_days = 365
+        custom_text = ""
+        if hasattr(self, "custom_structure_box"):
+            custom_text = self.custom_structure_box.get("1.0", "end").strip()
         return {
             "source_paths": list(self.source_paths),
             "destination": self.dest_entry.get().strip() if hasattr(self, "dest_entry") else "",
@@ -1723,6 +1910,29 @@ PRIVACY & SAFETY
             if hasattr(self, "copy_instead_var")
             else True,
             "dry_run": bool(self.dry_run_var.get()) if hasattr(self, "dry_run_var") else True,
+            "media_date_depth": self._selected_media_date_depth()
+            if hasattr(self, "media_date_depth_var")
+            else "year_month",
+            "documents_by_ext": bool(self.documents_by_ext_var.get())
+            if hasattr(self, "documents_by_ext_var")
+            else True,
+            "separate_archives": bool(self.separate_archives_var.get())
+            if hasattr(self, "separate_archives_var")
+            else True,
+            "category_subfolders": self._selected_category_subfolders()
+            if hasattr(self, "category_mode_vars")
+            else {},
+            "rename_with_date_prefix": bool(self.date_prefix_var.get())
+            if hasattr(self, "date_prefix_var")
+            else False,
+            "sanitize_filenames": bool(self.sanitize_names_var.get())
+            if hasattr(self, "sanitize_names_var")
+            else True,
+            "add_readme_notes": bool(self.readme_notes_var.get())
+            if hasattr(self, "readme_notes_var")
+            else True,
+            "archive_older_than_days": archive_days,
+            "custom_structure_text": custom_text,
             "last_quarantine_session": self._last_quarantine_session or "",
             "last_scan_db": str(last_scan_db_path()),
         }
@@ -2412,7 +2622,8 @@ PRIVACY & SAFETY
         lines = [
             f"Layout: {label}",
             f"Categories: {', '.join(sorted(options.categories or []))}",
-            f"Media by date: {options.media_by_date} · Docs by extension: {options.documents_by_ext} · Separate archives: {options.separate_archives}",
+            f"Media date folders: {options.media_date_depth} · Docs by extension: {options.documents_by_ext} · Separate archives: {options.separate_archives}",
+            f"Category overrides: {options.category_subfolders or {}}",
             f"Copy (safer): {options.copy_instead_of_move} · Date prefix: {options.rename_with_date_prefix} · Sanitize names: {options.sanitize_filenames}",
             f"README notes: {options.add_readme_notes} · Archive older than: {options.archive_older_than_days} days",
             f"Planned actions: {len(plan.items)}",
@@ -2442,8 +2653,14 @@ PRIVACY & SAFETY
     def _organise_plan_key(self, dest: str, layout_ids, options: OrganiseOptions) -> str:
         cats = ",".join(sorted(options.categories or []))
         layouts = "+".join(layout_ids) if isinstance(layout_ids, list) else str(layout_ids)
+        modes = ",".join(
+            f"{k}={v}"
+            for k, v in sorted((options.category_subfolders or {}).items())
+        )
         return (
-            f"{dest}|{layouts}|{cats}|{options.copy_instead_of_move}|"
+            f"{dest}|{layouts}|{cats}|{options.media_date_depth}|"
+            f"{options.documents_by_ext}|{options.separate_archives}|{modes}|"
+            f"{options.copy_instead_of_move}|"
             f"{options.rename_with_date_prefix}|{options.sanitize_filenames}|"
             f"{options.archive_older_than_days}|{options.custom_structure_text}"
         )
