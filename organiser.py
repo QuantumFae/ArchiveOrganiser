@@ -59,14 +59,14 @@ LAYOUT_PRESETS: list[LayoutPreset] = [
         id="life_areas",
         name="Life areas (Personal / Media / Finance / Archive)",
         description="Top-level life areas used in personal folder guides — clear homes for everyday files.",
-        example="01_Personal/ · 02_Media/Photos/ · 03_Finance/ · 04_Archive/",
+        example="Personal/ · Media/Photos/ · Finance/ · Archive/",
         useful_for=("Photos", "Videos", "Documents", "Other"),
     ),
     LayoutPreset(
         id="para",
         name="PARA (Areas / Resources / Archives)",
         description="PARA-inspired: Areas for ongoing life categories, Resources for reference, Archives for finished/old.",
-        example="2_Areas/Media/ · 2_Areas/Documents/ · 3_Resources/ · 4_Archives/",
+        example="Areas/Media/ · Areas/Documents/ · Resources/ · Archives/",
         useful_for=("Photos", "Documents", "Other"),
     ),
     LayoutPreset(
@@ -444,24 +444,24 @@ def suggest_destination(
     # --- Best-practice life-area / PARA / active-archive layouts ---
     if layout_id == "life_areas":
         if category in ("Photos", "Videos", "Audio"):
-            return media_path(dest_root / "02_Media" / category)
+            return media_path(dest_root / "Media" / category)
         if category == "Documents" and looks_financial(info.path.name):
-            return docs_path(dest_root / "03_Finance" / "Documents")
+            return docs_path(dest_root / "Finance" / "Documents")
         if category == "Documents":
-            return docs_path(dest_root / "01_Personal" / "Documents")
+            return docs_path(dest_root / "Personal" / "Documents")
         if category == "Archives" or age_days > opts.archive_older_than_days:
-            return flat_path(dest_root / "04_Archive" / category)
-        return flat_path(dest_root / "01_Personal" / "Other")
+            return flat_path(dest_root / "Archive" / category)
+        return flat_path(dest_root / "Personal" / "Other")
 
     if layout_id == "para":
         # PARA-inspired personal archive (Projects left as inbox for manual use)
         if age_days > opts.archive_older_than_days or category == "Archives":
-            return flat_path(dest_root / "4_Archives" / category)
+            return flat_path(dest_root / "Archives" / category)
         if category in ("Photos", "Videos", "Audio"):
-            return media_path(dest_root / "2_Areas" / "Media" / category)
+            return media_path(dest_root / "Areas" / "Media" / category)
         if category == "Documents":
-            return docs_path(dest_root / "2_Areas" / "Documents")
-        return flat_path(dest_root / "3_Resources" / category)
+            return docs_path(dest_root / "Areas" / "Documents")
+        return flat_path(dest_root / "Resources" / category)
 
     if layout_id == "active_archive":
         bucket = "Archive" if age_days > opts.archive_older_than_days else "Active"

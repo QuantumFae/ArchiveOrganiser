@@ -126,8 +126,8 @@ class FolderPickerDialog(ctk.CTkToplevel):
     ) -> None:
         super().__init__(parent)
         self.title(title)
-        self.geometry("820x520")
-        self.minsize(640, 420)
+        self.geometry("960x600")
+        self.minsize(720, 480)
         self.transient(parent)
         self.grab_set()
         self.result: Optional[str] = None
@@ -192,16 +192,25 @@ class FolderPickerDialog(ctk.CTkToplevel):
         # --- bottom buttons ---
         bottom = ctk.CTkFrame(self, fg_color="transparent")
         bottom.grid(row=3, column=0, columnspan=2, sticky="ew", padx=12, pady=(4, 12))
-        ctk.CTkButton(bottom, text="Cancel", width=110, command=self._cancel).pack(
+        ctk.CTkButton(bottom, text="Cancel", width=120, height=36, command=self._cancel).pack(
             side="right", padx=(8, 0)
         )
         ctk.CTkButton(
             bottom,
             text="Select this folder",
-            width=160,
-            fg_color="#2a7a4b",
+            width=200,
+            height=36,
+            fg_color="#1f6f5b",
+            hover_color="#185a4a",
             command=self._select,
         ).pack(side="right")
+        ctk.CTkButton(
+            bottom,
+            text="Refresh drives",
+            width=130,
+            height=36,
+            command=self._refresh_places,
+        ).pack(side="left")
 
         self._selected_child: Optional[Path] = None
         self._folder_buttons: list[ctk.CTkButton] = []
@@ -224,12 +233,16 @@ class FolderPickerDialog(ctk.CTkToplevel):
                 self.places_frame,
                 text=label,
                 anchor="w",
-                height=32,
+                height=36,
                 fg_color=("gray80", "gray30"),
                 text_color=("gray10", "gray90"),
                 command=lambda p=path: self.go_to(p),
             )
             btn.pack(fill="x", padx=2, pady=2)
+
+    def _refresh_places(self) -> None:
+        self._build_places()
+        self.status.configure(text="Places & drives refreshed.")
 
     def refresh(self) -> None:
         self.path_entry.delete(0, "end")
