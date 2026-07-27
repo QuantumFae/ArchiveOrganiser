@@ -1495,7 +1495,6 @@ class ArchiveOrganiserApp(ctk.CTk):
             variable=self.copy_instead_var,
             command=self._update_layout_visual,
         ).pack(anchor="w")
-        self.show_advanced_org_var = tk.BooleanVar(value=False)
 
         # Advanced options live on their own tab (full height — easier to see)
         opts = ctk.CTkScrollableFrame(advanced_tab)
