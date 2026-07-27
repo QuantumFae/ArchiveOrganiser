@@ -6,16 +6,21 @@ Tuned for large (hundreds of GB / 1TB+) drives:
 - streams hashes in chunks (never loads a whole huge file into RAM)
 - partial CRC first, full CRC only on collisions
 - caps zip member expansion; reports size + file progress
+- optional physical unzip beside each .zip (opt-in; keeps the original zip
+  unless the low-space option deletes it after a successful extract)
 """
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
+import shutil
 import time
 import zipfile
 import zlib
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -49,6 +54,13 @@ LARGE_HASH_STATUS_EVERY = 64 * 1024 * 1024  # 64 MB
 PARTIAL_CRC_BYTES = 8 * 1024 * 1024  # 8 MB
 MAX_ZIP_MEMBERS_PER_ARCHIVE = 5_000
 MAX_ZIP_MEMBERS_TOTAL = 100_000
+# Sibling folder naming: Vacation.zip → Vacation_unzipped/
+UNZIPPED_FOLDER_SUFFIX = "_unzipped"
+UNZIPPED_NOTE_NAME = "UNZIPPED.txt"
+MAX_UNZIPPED_NAME_TRIES = 50
+# Extra free space required beyond zip uncompressed size before we treat the drive as "OK"
+EXTRACT_SPACE_MARGIN_BYTES = 64 * 1024 * 1024  # 64 MiB
+EXTRACT_SPACE_MARGIN_RATIO = 0.10  # or +10% of uncompressed size, whichever is larger
 
 
 @dataclass
@@ -57,6 +69,10 @@ class ScanOptions:
 
     include_junk_system: bool = False
     scan_zip_contents: bool = False
+    # Physically extract .zip beside the archive (uses disk; keeps the .zip by default)
+    extract_zips: bool = False
+    # If extract is on and free space looks tight: after a successful extract, delete the .zip
+    delete_zip_if_low_space: bool = False
     always_skip_quarantine: bool = True
     stay_on_device: bool = True
     # Write metadata to SQLite (recommended for large drives)
@@ -249,6 +265,294 @@ def _list_zip_members(
         result.skipped += 1
 
 
+def unzipped_folder_basename(zip_path: Path) -> str:
+    """Readable folder name: Vacation.zip → Vacation_unzipped."""
+    # Path('.zip') has empty suffix and stem '.zip' — treat that as no name.
+    stem = zip_path.stem.strip()
+    if not stem or stem.startswith(".") and zip_path.suffix == "":
+        stem = "archive"
+    if stem.startswith("."):
+        stem = stem.lstrip(".") or "archive"
+    return f"{stem}{UNZIPPED_FOLDER_SUFFIX}"
+
+
+def _note_matches_zip(folder: Path, zip_path: Path) -> bool:
+    """True if UNZIPPED.txt says this folder came from zip_path."""
+    note = folder / UNZIPPED_NOTE_NAME
+    if not note.is_file():
+        return False
+    try:
+        text = note.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    resolved = str(zip_path.resolve())
+    return resolved in text or str(zip_path) in text
+
+
+def find_existing_unzipped_folder(zip_path: Path) -> Optional[Path]:
+    """Find a sibling *_unzipped folder already created from this zip."""
+    parent = zip_path.parent
+    base = unzipped_folder_basename(zip_path)
+    names = [base] + [f"{base}_{n}" for n in range(2, MAX_UNZIPPED_NAME_TRIES + 1)]
+    for name in names:
+        candidate = parent / name
+        if candidate.is_dir() and _note_matches_zip(candidate, zip_path):
+            return candidate
+    return None
+
+
+def _choose_extract_folder(zip_path: Path) -> Optional[Path]:
+    """
+    Pick a new sibling folder for extraction.
+
+    - Prefer Vacation_unzipped
+    - Reuse if the folder exists but is empty
+    - If a non-empty folder already exists (user data), use Vacation_unzipped_2, …
+    - Never overwrite / wipe an existing non-empty folder
+    """
+    parent = zip_path.parent
+    base = unzipped_folder_basename(zip_path)
+    names = [base] + [f"{base}_{n}" for n in range(2, MAX_UNZIPPED_NAME_TRIES + 1)]
+    for name in names:
+        candidate = parent / name
+        if not candidate.exists():
+            return candidate
+        if candidate.is_dir():
+            try:
+                if not any(candidate.iterdir()):
+                    return candidate
+            except OSError:
+                continue
+        # Non-empty dir or a file with that name — try next suffix
+    return None
+
+
+def _safe_member_dest(dest_root: Path, member_name: str) -> Optional[Path]:
+    """
+    Resolve where a zip entry should land. Reject path traversal (zip-slip).
+    Returns None for directories or unsafe names.
+    """
+    cleaned = member_name.replace("\\", "/").strip()
+    if not cleaned or cleaned.endswith("/"):
+        return None
+    # Drop absolute / drive-style prefixes
+    while cleaned.startswith("/"):
+        cleaned = cleaned[1:]
+    if not cleaned or ":" in Path(cleaned).parts[0]:
+        return None
+
+    dest_root_resolved = dest_root.resolve()
+    target = (dest_root / cleaned).resolve()
+    try:
+        target.relative_to(dest_root_resolved)
+    except ValueError:
+        return None
+    # Also reject any ".." that somehow survived
+    if ".." in Path(cleaned).parts:
+        return None
+    return target
+
+
+def _write_unzipped_note(
+    dest_folder: Path,
+    zip_path: Path,
+    *,
+    zip_deleted: bool = False,
+    zip_path_display: Optional[str] = None,
+) -> None:
+    """Leave a short note so the user knows why this folder appeared."""
+    when = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if zip_deleted:
+        zip_line = (
+            "The original .zip file was deleted after a successful extract "
+            "to free disk space (you turned on that option).\n"
+        )
+    else:
+        zip_line = "The original .zip file was kept (not deleted).\n"
+    source_line = zip_path_display
+    if not source_line:
+        try:
+            source_line = str(zip_path.resolve())
+        except OSError:
+            source_line = str(zip_path)
+    text = (
+        "This folder was created by Archive Organiser during a scan.\n"
+        "\n"
+        f"Source zip: {source_line}\n"
+        f"Extracted at: {when}\n"
+        "\n"
+        f"{zip_line}"
+        "Folder naming: <zip name>_unzipped "
+        "(e.g. Vacation.zip → Vacation_unzipped/).\n"
+    )
+    (dest_folder / UNZIPPED_NOTE_NAME).write_text(text, encoding="utf-8")
+
+
+def estimated_zip_uncompressed_bytes(zip_path: Path) -> Optional[int]:
+    """Sum of uncompressed member sizes from the zip directory, or None if unreadable."""
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            return sum(info.file_size for info in zf.infolist() if not info.is_dir())
+    except (OSError, zipfile.BadZipFile):
+        return None
+
+
+def needed_extract_bytes(uncompressed_bytes: int) -> int:
+    """Uncompressed size plus a safety margin (10% or 64 MiB, whichever is larger)."""
+    margin = max(EXTRACT_SPACE_MARGIN_BYTES, int(uncompressed_bytes * EXTRACT_SPACE_MARGIN_RATIO))
+    return uncompressed_bytes + margin
+
+
+def free_bytes_on_volume(path: Path) -> Optional[int]:
+    """Free bytes on the volume that holds path, or None if we cannot check."""
+    try:
+        return int(shutil.disk_usage(os.fspath(path)).free)
+    except OSError:
+        return None
+
+
+def disk_space_is_low_for_extract(path: Path, uncompressed_bytes: int) -> bool:
+    """True when free space on path's volume is below estimate + margin."""
+    free = free_bytes_on_volume(path)
+    if free is None:
+        return False
+    return free < needed_extract_bytes(uncompressed_bytes)
+
+
+def _is_no_space_error(exc: BaseException) -> bool:
+    """True for 'no space left on device' style errors."""
+    if isinstance(exc, OSError) and exc.errno in (errno.ENOSPC,):
+        return True
+    text = str(exc).lower()
+    return "no space" in text or "not enough space" in text
+
+
+def extract_zip_beside(
+    zip_path: Path,
+    status_cb: Optional[Callable[[str], None]] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
+    delete_zip_if_low_space: bool = False,
+) -> tuple[Optional[Path], str]:
+    """
+    Extract a .zip into a new sibling folder named like Vacation_unzipped/.
+
+    Returns (folder_path, message). folder_path is None on skip/failure.
+    Never wipes an existing non-empty folder.
+    Never deletes the original zip unless delete_zip_if_low_space is on,
+    free space looked tight before extract, and extract fully succeeded.
+    """
+    existing = find_existing_unzipped_folder(zip_path)
+    if existing is not None:
+        return existing, f"Already extracted: {existing.name}"
+
+    if not zipfile.is_zipfile(zip_path):
+        return None, f"Not a readable zip: {zip_path.name}"
+
+    dest = _choose_extract_folder(zip_path)
+    if dest is None:
+        return None, (
+            f"Skipped extract for {zip_path.name}: "
+            f"no free {unzipped_folder_basename(zip_path)} name "
+            "(existing folders left untouched)"
+        )
+
+    # Estimate space before we start writing (used only for the optional delete-after-success)
+    space_was_low = False
+    uncompressed = estimated_zip_uncompressed_bytes(zip_path)
+    if uncompressed is not None:
+        space_was_low = disk_space_is_low_for_extract(zip_path.parent, uncompressed)
+        if space_was_low and status_cb:
+            status_cb(
+                f"Low free space for {zip_path.name} "
+                f"(need about {format_bytes(needed_extract_bytes(uncompressed))}); "
+                "will extract first"
+                + (
+                    ", then delete the zip if extract succeeds"
+                    if delete_zip_if_low_space
+                    else ""
+                )
+            )
+
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return None, f"Could not create {dest.name}: {exc}"
+
+    written = 0
+    skipped_unsafe = 0
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            members = [info for info in zf.infolist() if not info.is_dir()]
+            total = len(members)
+            for index, info in enumerate(members, start=1):
+                if should_cancel and should_cancel():
+                    return dest, f"Extract cancelled at {zip_path.name}"
+
+                target = _safe_member_dest(dest, info.filename)
+                if target is None:
+                    skipped_unsafe += 1
+                    continue
+
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(info, "r") as src, target.open("wb") as out:
+                        while True:
+                            if should_cancel and should_cancel():
+                                return dest, f"Extract cancelled at {zip_path.name}"
+                            chunk = src.read(CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            out.write(chunk)
+                    written += 1
+                except OSError as exc:
+                    extra = " (disk full?)" if _is_no_space_error(exc) else ""
+                    return None, (
+                        f"Extract failed for {zip_path.name} → {info.filename}: {exc}{extra}"
+                    )
+
+                if status_cb and (index == 1 or index % 50 == 0 or index == total):
+                    status_cb(
+                        f"Extracting {zip_path.name}: {index}/{total} files → {dest.name}"
+                    )
+    except (OSError, zipfile.BadZipFile) as exc:
+        extra = " (disk full?)" if _is_no_space_error(exc) else ""
+        return None, f"Could not extract {zip_path.name}: {exc}{extra}"
+
+    # Success path only — never delete on cancel/failure above
+    zip_deleted = False
+    delete_note = ""
+    # Resolve while the zip still exists (note text needs the original path)
+    try:
+        zip_path_display = str(zip_path.resolve())
+    except OSError:
+        zip_path_display = str(zip_path)
+
+    if delete_zip_if_low_space and space_was_low:
+        try:
+            zip_path.unlink()
+            zip_deleted = True
+            delete_note = "; deleted zip to free disk space"
+        except OSError as exc:
+            delete_note = f"; wanted to delete zip for space but failed: {exc}"
+
+    try:
+        _write_unzipped_note(
+            dest,
+            zip_path,
+            zip_deleted=zip_deleted,
+            zip_path_display=zip_path_display,
+        )
+    except OSError as exc:
+        return dest, (
+            f"Extracted {written} files but could not write note: {exc}{delete_note}"
+        )
+
+    extra = f", skipped {skipped_unsafe} unsafe path(s)" if skipped_unsafe else ""
+    return (
+        dest,
+        f"Extracted {written} files from {zip_path.name} → {dest.name}{extra}{delete_note}",
+    )
+
 def scan_paths(
     roots: list[str],
     status_cb: Optional[Callable[[str], None]] = None,
@@ -376,9 +680,47 @@ def scan_paths(
                     )
                     _add_file(result, info, store)
 
+                    used_on_disk_extract = False
+                    if (
+                        opts.extract_zips
+                        and full.suffix.lower() in SCANNABLE_ARCHIVE_EXTS
+                    ):
+                        dest_folder, extract_msg = extract_zip_beside(
+                            full,
+                            status_cb=maybe_status,
+                            should_cancel=should_cancel,
+                            delete_zip_if_low_space=opts.delete_zip_if_low_space,
+                        )
+                        maybe_status(extract_msg, force=True)
+                        if dest_folder is not None:
+                            used_on_disk_extract = True
+                            # Count only brand-new extracts (not "already extracted")
+                            if extract_msg.startswith("Extracted "):
+                                result.zips_extracted += 1
+                                if "deleted zip to free disk space" in extract_msg:
+                                    result.zips_deleted_low_space += 1
+                            # Make sure os.walk will visit the new sibling folder
+                            if (
+                                dest_folder.parent == current
+                                and dest_folder.name not in dirnames
+                                and not should_skip_dir(dest_folder.name, opts)
+                            ):
+                                dirnames.append(dest_folder.name)
+                        elif extract_msg:
+                            result.errors.append(extract_msg)
+
+                    if should_cancel and should_cancel():
+                        result.errors.append("Scan cancelled by user.")
+                        if store:
+                            store.flush()
+                        result.duration_seconds = timer.seconds()
+                        return result
+
+                    # Prefer on-disk extracted files over virtual zip listing
                     if (
                         opts.scan_zip_contents
                         and full.suffix.lower() in SCANNABLE_ARCHIVE_EXTS
+                        and not used_on_disk_extract
                     ):
                         _list_zip_members(
                             full,
@@ -443,10 +785,19 @@ def scan_paths(
             if result.zip_members_capped
             else ""
         )
+        extracted = (
+            f", extracted {result.zips_extracted} zip(s) to disk"
+            if result.zips_extracted
+            else ""
+        )
+        if result.zips_deleted_low_space:
+            extracted += (
+                f" (deleted {result.zips_deleted_low_space} zip(s) to free space)"
+            )
         status_cb(
             timer.stamp(
                 f"Scan complete: {result.file_count} files · "
-                f"{format_bytes(result.total_bytes)}{extra}{cross}{capped} "
+                f"{format_bytes(result.total_bytes)}{extra}{cross}{capped}{extracted} "
                 f"in {format_duration(result.duration_seconds)}"
             )
         )

@@ -266,6 +266,10 @@ class ArchiveOrganiserApp(ctk.CTk):
 
         self.include_junk_var = tk.BooleanVar(value=bool(self._settings.get("include_junk")))
         self.scan_zips_var = tk.BooleanVar(value=bool(self._settings.get("scan_zips")))
+        self.extract_zips_var = tk.BooleanVar(value=bool(self._settings.get("extract_zips")))
+        self.delete_zip_if_low_space_var = tk.BooleanVar(
+            value=bool(self._settings.get("delete_zip_if_low_space"))
+        )
         ctk.CTkCheckBox(
             opts_frame,
             text="Include junk / system folders (.Trash, System Volume Information, dot-folders, …)",
@@ -276,6 +280,22 @@ class ArchiveOrganiserApp(ctk.CTk):
             text="Scan inside .zip archives (slower / more RAM on huge libraries — capped)",
             variable=self.scan_zips_var,
         ).pack(anchor="w", padx=8, pady=2)
+        ctk.CTkCheckBox(
+            opts_frame,
+            text="Unzip .zip files beside them during scan (Vacation.zip → Vacation_unzipped/; uses disk; keeps the .zip)",
+            variable=self.extract_zips_var,
+            command=self._sync_delete_zip_low_space_option,
+        ).pack(anchor="w", padx=8, pady=2)
+        self.delete_zip_low_space_cb = ctk.CTkCheckBox(
+            opts_frame,
+            text=(
+                "If the drive is low on space, delete the .zip after a successful unzip "
+                "(never deletes if unzip fails; only used when Unzip above is on)"
+            ),
+            variable=self.delete_zip_if_low_space_var,
+        )
+        self.delete_zip_low_space_cb.pack(anchor="w", padx=28, pady=(0, 2))
+        self._sync_delete_zip_low_space_option()
 
         buttons = ctk.CTkFrame(opts_frame, fg_color="transparent")
         buttons.pack(fill="x", padx=8, pady=(8, 2))
@@ -1554,10 +1574,15 @@ class ArchiveOrganiserApp(ctk.CTk):
         ).grid(row=0, column=0, columnspan=3, sticky="w", padx=10, pady=(8, 2))
         ctk.CTkLabel(
             dest_panel,
-            text="Where tidy copies/moves go. Pick an empty or new folder when you can.",
+            text=(
+                "Where tidy copies/moves go. An existing archive is fine — Apply adds into it "
+                "(new folders only when needed; never removes destination files)."
+            ),
             font=ctk.CTkFont(size=11),
             text_color=MUTED,
             anchor="w",
+            wraplength=720,
+            justify="left",
         ).grid(row=1, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 4))
         ctk.CTkLabel(dest_panel, text="Path:", font=ctk.CTkFont(size=12, weight="bold")).grid(
             row=2, column=0, padx=(10, 8), pady=(0, 10), sticky="w"
@@ -1680,6 +1705,18 @@ class ArchiveOrganiserApp(ctk.CTk):
             variable=self.copy_instead_var,
             command=self._update_layout_visual,
         ).pack(anchor="w")
+        ctk.CTkLabel(
+            safety,
+            text=(
+                "Apply merges into the destination without deleting what is already there. "
+                "Move removes files from the source only (not from the destination)."
+            ),
+            font=ctk.CTkFont(size=11),
+            text_color=MUTED,
+            anchor="w",
+            justify="left",
+            wraplength=420,
+        ).pack(anchor="w", pady=(2, 0))
 
         # Advanced options live on their own tab (full height — easier to see)
         opts = ctk.CTkScrollableFrame(advanced_tab)
@@ -1859,7 +1896,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         ).grid(row=15, column=0, sticky="w", padx=8, pady=4)
         ctk.CTkCheckBox(
             opts,
-            text="Write README.txt notes in top folders",
+            text="Write README.txt notes in top folders (skip if already present)",
             variable=self.readme_notes_var,
             command=self._update_layout_visual,
         ).grid(row=16, column=0, sticky="w", padx=8, pady=4)
@@ -2383,6 +2420,11 @@ class ArchiveOrganiserApp(ctk.CTk):
    • Add folder / drive. Tick rows to select; Remove selected / Open as needed.
    • Your sources, destination, layouts, and window size are remembered next launch.
    • Leave “Scan inside .zip” off for huge drives (you can turn it on for small libraries).
+   • Optional: “Unzip .zip files beside them” creates Vacation_unzipped/ next to Vacation.zip
+     (writes UNZIPPED.txt inside; keeps the .zip by default; skips/renames if that folder exists).
+     Optional follow-up: “If the drive is low on space, delete the .zip after a successful unzip”
+     (off by default; only runs after extract succeeds — never deletes if unzip fails).
+     When unzip-on-scan is on, the scan uses the extracted files and does not also list zip members.
    • Click Scan now. Results are saved on disk — use Reload last scan to avoid re-scanning.
    • One-click start: run scripts/install_desktop_launcher.sh once.
 
@@ -2403,11 +2445,14 @@ class ArchiveOrganiserApp(ctk.CTk):
 
 4. Organise tab
    • Destination panel: Browse / add folder… (same friendly picker as Sources).
+   • Existing archive roots are OK — Apply adds into them (creates missing folders only;
+     never deletes or overwrites destination files; name clashes become name_1.ext).
    • Left pane has two tabs: Layouts (choose structure) and Advanced (full-height options).
    • Suggest layout for me: offline rules (or optional local Ollama) fill layouts + folder options.
    • Advanced → Use local AI (Ollama) is optional and off by default; falls back to rules if needed.
    • Life-area folders use plain names (Personal, Media, Finance) — not 01_Personal.
    • Keep Copy + Dry run on at first. Preview plan, then Run dry run / Apply organise.
+   • Copy keeps sources; Move removes from the source only — destination content is never wiped.
    • Custom structure cannot mix with other layouts (Custom alone).
 
 LARGE DRIVES (1TB+)
@@ -2592,6 +2637,10 @@ PRIVACY & SAFETY
             "appearance": self.appearance_var.get() if hasattr(self, "appearance_var") else "System",
             "include_junk": bool(self.include_junk_var.get()) if hasattr(self, "include_junk_var") else False,
             "scan_zips": bool(self.scan_zips_var.get()) if hasattr(self, "scan_zips_var") else False,
+            "extract_zips": bool(self.extract_zips_var.get()) if hasattr(self, "extract_zips_var") else False,
+            "delete_zip_if_low_space": bool(self.delete_zip_if_low_space_var.get())
+            if hasattr(self, "delete_zip_if_low_space_var")
+            else False,
             "copy_instead_of_move": bool(self.copy_instead_var.get())
             if hasattr(self, "copy_instead_var")
             else True,
@@ -2625,6 +2674,17 @@ PRIVACY & SAFETY
             "last_quarantine_session": self._last_quarantine_session or "",
             "last_scan_db": str(last_scan_db_path()),
         }
+
+    def _sync_delete_zip_low_space_option(self) -> None:
+        """Enable the low-space zip-delete box only when Unzip-on-scan is ticked."""
+        if not hasattr(self, "delete_zip_low_space_cb"):
+            return
+        enabled = bool(self.extract_zips_var.get()) if hasattr(self, "extract_zips_var") else False
+        state = "normal" if enabled else "disabled"
+        try:
+            self.delete_zip_low_space_cb.configure(state=state)
+        except tk.TclError:
+            pass
 
     def _persist_settings(self) -> None:
         try:
@@ -2748,10 +2808,17 @@ PRIVACY & SAFETY
 
         include_junk = store.get_meta("include_junk", "0") == "1"
         scan_zips = store.get_meta("scan_zips", "0") == "1"
+        extract_zips = store.get_meta("extract_zips", "0") == "1"
+        delete_zip_if_low_space = store.get_meta("delete_zip_if_low_space", "0") == "1"
         if hasattr(self, "include_junk_var"):
             self.include_junk_var.set(include_junk)
         if hasattr(self, "scan_zips_var"):
             self.scan_zips_var.set(scan_zips)
+        if hasattr(self, "extract_zips_var"):
+            self.extract_zips_var.set(extract_zips)
+        if hasattr(self, "delete_zip_if_low_space_var"):
+            self.delete_zip_if_low_space_var.set(delete_zip_if_low_space)
+        self._sync_delete_zip_low_space_option()
 
         duration = 0.0
         try:
@@ -2942,6 +3009,9 @@ PRIVACY & SAFETY
         options = ScanOptions(
             include_junk_system=self.include_junk_var.get(),
             scan_zip_contents=self.scan_zips_var.get(),
+            extract_zips=self.extract_zips_var.get(),
+            delete_zip_if_low_space=bool(self.delete_zip_if_low_space_var.get())
+            and bool(self.extract_zips_var.get()),
         )
         db_path = last_scan_db_path()
         result = scan_paths(
@@ -2958,8 +3028,17 @@ PRIVACY & SAFETY
                 store.set_meta("sources_json", json.dumps(self.source_paths))
                 store.set_meta("include_junk", "1" if options.include_junk_system else "0")
                 store.set_meta("scan_zips", "1" if options.scan_zip_contents else "0")
+                store.set_meta("extract_zips", "1" if options.extract_zips else "0")
+                store.set_meta(
+                    "delete_zip_if_low_space",
+                    "1" if options.delete_zip_if_low_space else "0",
+                )
                 store.set_meta("duration_seconds", str(result.duration_seconds))
                 store.set_meta("archive_members", str(result.archive_members))
+                store.set_meta("zips_extracted", str(result.zips_extracted))
+                store.set_meta(
+                    "zips_deleted_low_space", str(result.zips_deleted_low_space)
+                )
                 store.set_meta("total_bytes", str(result.total_bytes))
             except Exception:
                 pass
@@ -3026,6 +3105,16 @@ PRIVACY & SAFETY
             f"Skipped / unreadable: {result.skipped}",
             f"Errors: {len(result.errors)}",
         ]
+        if result.zips_extracted:
+            lines.insert(
+                5,
+                f"  · Zips extracted to disk (*_unzipped folders): {result.zips_extracted}",
+            )
+        if result.zips_deleted_low_space:
+            lines.insert(
+                6 if result.zips_extracted else 5,
+                f"  · Zips deleted after extract (low space): {result.zips_deleted_low_space}",
+            )
         if result.cross_device_skipped:
             lines.append(f"Other-mount folders skipped: {result.cross_device_skipped}")
         if result.zip_members_capped:
@@ -3072,6 +3161,13 @@ PRIVACY & SAFETY
         )
         if result.archive_members:
             summary += f"\n{result.archive_members} files inside zips"
+        if result.zips_extracted:
+            summary += f"\n{result.zips_extracted} zip(s) extracted to *_unzipped folders"
+        if result.zips_deleted_low_space:
+            summary += (
+                f"\n{result.zips_deleted_low_space} zip(s) deleted after extract "
+                "(low disk space)"
+            )
         self.overview_summary.configure(text=summary)
         self._write_box(self.overview_box, "\n".join(lines))
 
@@ -3483,21 +3579,27 @@ PRIVACY & SAFETY
                 APP_TITLE,
                 f"Layout: {label}\n"
                 f"Action: {action} {len(plan.items)} files into:\n{dest}\n\n"
+                "Adds into the destination — existing archive files/folders are left alone.\n"
+                "Name clashes get a unique name (e.g. photo_1.jpg); nothing is overwritten.\n\n"
                 + (
-                    "Copy keeps originals until you delete them later (safer).\n"
+                    "Copy keeps originals on the source until you delete them later (safer).\n"
                     if options.copy_instead_of_move
-                    else "MOVE changes where files live. Prefer Copy if unsure.\n"
+                    else (
+                        "MOVE removes files from the source only (destination is not wiped).\n"
+                        "Prefer Copy if unsure.\n"
+                    )
                 )
                 + "Continue?",
             )
             if not ok:
                 return
-            # Extra confirm for destructive move
+            # Extra confirm for destructive move (source side only)
             if not options.copy_instead_of_move:
                 ok2 = messagebox.askyesno(
                     APP_TITLE,
                     f"Final confirm: MOVE {len(plan.items)} files?\n\n"
-                    "This cannot be undone automatically.\n"
+                    "Files leave the source location (not undone automatically).\n"
+                    "Destination content already there is not deleted.\n"
                     "Quarantine is not used for organise.",
                 )
                 if not ok2:

@@ -52,6 +52,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "appearance": "System",
     "include_junk": False,
     "scan_zips": False,
+    "extract_zips": False,
+    "delete_zip_if_low_space": False,
     "copy_instead_of_move": True,
     "dry_run": True,
     "media_date_depth": "year_month",

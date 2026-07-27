@@ -1,10 +1,16 @@
-"""Suggest and apply a tidy folder layout. Never deletes files."""
+"""Suggest and apply a tidy folder layout.
+
+Additive / non-destructive to the destination:
+- Creates missing folders only; never deletes or clears destination content.
+- Never overwrites an existing file at the target path (uses unique_path).
+- Copy mode leaves sources in place; Move removes from the source only.
+"""
 
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Set
 
 from models import FileInfo
 from quarantine import DEFAULT_QUARANTINE_NAME
@@ -515,9 +521,17 @@ def suggest_destination(
     return archives_or_other(category)
 
 
-def unique_path(path: Path) -> Path:
-    """If the destination exists, add _1, _2, … before the extension."""
-    if not path.exists():
+def unique_path(path: Path, reserved: Optional[Set[Path]] = None) -> Path:
+    """
+    If the destination already exists on disk or is reserved in this run,
+    add _1, _2, … before the extension (never overwrite).
+    """
+    claimed = reserved if reserved is not None else set()
+
+    def is_taken(candidate: Path) -> bool:
+        return candidate.exists() or candidate in claimed
+
+    if not is_taken(path):
         return path
     stem = path.stem
     suffix = path.suffix
@@ -525,7 +539,7 @@ def unique_path(path: Path) -> Path:
     counter = 1
     while True:
         candidate = parent / f"{stem}_{counter}{suffix}"
-        if not candidate.exists():
+        if not is_taken(candidate):
             return candidate
         counter += 1
 
@@ -687,27 +701,58 @@ def apply_organise_plan(
     dest_root: Optional[str] = None,
 ) -> list[str]:
     """
-    Carry out the organise plan.
+    Carry out the organise plan (additive merge into dest_root).
+
     dry_run=True means only describe what would happen (safe default).
     Prefer copy_instead_of_move (archive best practice) when options say so.
+
+    Never deletes destination files/folders. Never overwrites an existing
+    destination file — collisions get a unique name (name_1.ext, …).
+    Creates missing parent folders with mkdir(..., exist_ok=True) only.
     """
     opts = options or OrganiseOptions()
     mode_tag = "copy" if opts.copy_instead_of_move else "move"
     log: list[str] = []
     total = len(plan.items)
     written_dests: list[Path] = []
+    # Same-batch name collisions + existing files both go through unique_path
+    reserved: set[Path] = set()
 
     for index, item in enumerate(plan.items, start=1):
         if should_cancel and should_cancel():
             log.append("[cancelled] Organise stopped by user.")
             break
-        final_dest = unique_path(item.destination) if not dry_run else item.destination
+        final_dest = unique_path(item.destination, reserved)
+        # Last-moment guard: never write onto an existing path
+        if not dry_run and final_dest.exists():
+            final_dest = unique_path(final_dest, reserved)
+        reserved.add(final_dest)
+        renamed = final_dest != item.destination
         message = f"{item.source}  →  {final_dest}"
+        if renamed:
+            message += "  (name taken; used unique name)"
         if dry_run:
-            log.append(f"[preview-{mode_tag}] {message}")
+            tag = f"preview-{mode_tag}-unique" if renamed else f"preview-{mode_tag}"
+            log.append(f"[{tag}] {message}")
             continue
         try:
+            # Only create missing folders — never wipe or alter existing ones
             final_dest.parent.mkdir(parents=True, exist_ok=True)
+            if final_dest.exists():
+                # Another process created the file between unique_path and here
+                reserved.discard(final_dest)
+                final_dest = unique_path(item.destination, reserved)
+                reserved.add(final_dest)
+                message = (
+                    f"{item.source}  →  {final_dest}  (name taken; used unique name)"
+                )
+            if final_dest.exists():
+                log.append(
+                    f"[skipped] destination exists, could not find free name: "
+                    f"{item.source}  →  {item.destination}"
+                )
+                reserved.discard(final_dest)
+                continue
             if opts.copy_instead_of_move:
                 shutil.copy2(str(item.source), str(final_dest))
                 log.append(f"[copied] {message}")
@@ -719,6 +764,7 @@ def apply_organise_plan(
                 verb = "Copying" if opts.copy_instead_of_move else "Moving"
                 status_cb(f"{verb} files: {index}/{total}")
         except OSError as exc:
+            reserved.discard(final_dest)
             log.append(f"[error] {item.source}: {exc}")
 
     if not dry_run and opts.add_readme_notes and dest_root and written_dests:
@@ -734,12 +780,15 @@ def apply_organise_plan(
                     continue
             for folder in sorted(children):
                 note = folder / "README.txt"
-                if not note.exists():
-                    note.write_text(
-                        readme_for_folder(folder.name, plan.layout_name),
-                        encoding="utf-8",
-                    )
-                    log.append(f"[readme] {note}")
+                # Never clobber a user's existing README
+                if note.exists():
+                    log.append(f"[readme-skip] already exists: {note}")
+                    continue
+                note.write_text(
+                    readme_for_folder(folder.name, plan.layout_name),
+                    encoding="utf-8",
+                )
+                log.append(f"[readme] {note}")
         except OSError as exc:
             log.append(f"[readme-error] {exc}")
 
@@ -750,6 +799,9 @@ def destination_conflicts_with_sources(dest: str, sources: list[str]) -> Optiona
     """
     Return a warning message if the destination is the same as,
     or inside, a scan source (risky).
+
+    An existing archive folder outside your sources is fine — organise
+    merges into it without removing what is already there.
     """
     try:
         dest_path = Path(dest).expanduser().resolve()
@@ -770,7 +822,8 @@ def destination_conflicts_with_sources(dest: str, sources: list[str]) -> Optiona
             return (
                 f"Destination is inside a scan source:\n{dest_path}\n"
                 f"(source: {source_path})\n\n"
-                "This can make results confusing. Prefer an empty folder outside your sources."
+                "This can make results confusing. Choose a destination outside your "
+                "scan sources (an existing archive root is OK)."
             )
         except ValueError:
             pass

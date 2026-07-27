@@ -107,6 +107,10 @@ class ScanResult:
     file_count: int = 0
     # Zip members skipped due to per-zip / total caps
     zip_members_capped: int = 0
+    # Zips physically extracted to sibling *_unzipped folders during scan
+    zips_extracted: int = 0
+    # Zips removed after a successful extract because free space was low (opt-in)
+    zips_deleted_low_space: int = 0
     # Optional SQLite index (see scan_store.ScanStore)
     store: object = None
 

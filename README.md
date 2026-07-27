@@ -81,6 +81,8 @@ Use a **test folder** with a few copied files first. Learn the buttons before sc
 2. Optionally tick:
    - **Include junk / system folders** (Trash, System Volume Information, dot-folders, …)
    - **Scan inside .zip archives** (off by default for huge drives; listings are capped)
+   - **Unzip .zip files beside them during scan** (off by default; creates `Vacation_unzipped/` next to `Vacation.zip`, writes `UNZIPPED.txt`, keeps the original zip). When this is on, the scan prefers the extracted files and does not also list members inside that zip.
+   - **If the drive is low on space, delete the .zip after a successful unzip** (off by default; only used with Unzip above; never deletes if unzip fails)
 3. On Linux, external drives often appear under Places as **Drive: …** (from `/media`, `/mnt`, `/run/media`).
 4. Click **Scan now** and wait for the status bar to finish. Large libraries use an **SQLite index** so RAM stays under control.
 
@@ -103,7 +105,9 @@ Quarantined files go to:
 Each session includes a `manifest.json` listing original paths. Restore by moving files back manually.
 
 ### 5. Organise tab
-1. Choose a **destination** folder (ideally empty / a tidy drive, outside your sources).
+1. Choose a **destination** folder (new or an existing archive root — outside your sources).
+   Apply **adds into** that tree: creates missing folders only, never deletes destination
+   content, and never overwrites an existing file (clashes become `name_1.ext`).
 2. Pick one or more **folder layouts** (each shows a short description + example):
    - **Use recommended** ticks the best fit from your scan; **Single layout only** keeps one layout.
    - Combine order appears under the list (extra layouts nest folder parts together).
@@ -115,6 +119,7 @@ Each session includes a `manifest.json` listing original paths. Restore by movin
 4. Drag the **sashes** to resize options, preview, and plan panes.
 5. Keep **Dry run only** ticked → **Preview plan** → **Run dry run** / **Browse dry-run…**.
 6. When ready, untick Dry run and click **Apply organise**.
+   Prefer **Copy** (keeps sources). **Move** removes from the *source* only — not from the destination.
 
 ---
 
