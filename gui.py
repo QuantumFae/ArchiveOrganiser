@@ -35,7 +35,9 @@ from ctk_theme import (
     LIST_BTN,
     LIST_BTN_TEXT,
     MUTED,
+    PRIMARY,
     SELECT,
+    SURFACE,
     WARNING,
     apply_theme,
     paned_bg,
@@ -180,11 +182,16 @@ class ArchiveOrganiserApp(ctk.CTk):
             self,
             text="Start on Sources: add a folder or drive, then Scan now.",
             anchor="w",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color=MUTED,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=PRIMARY,
+            fg_color=SURFACE,
+            corner_radius=6,
+            height=28,
+            padx=10,
         )
-        self.workflow_banner.grid(row=1, column=0, sticky="ew", padx=12, pady=(2, 0))
+        self.workflow_banner.grid(row=1, column=0, sticky="ew", padx=12, pady=(4, 2))
         self._workflow_banner = self.workflow_banner
+        self._organise_preview_ready = False
 
         self.tabs = ctk.CTkTabview(self)
         self.tabs.grid(row=2, column=0, sticky="nsew", padx=8, pady=(2, 2))
@@ -261,7 +268,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         ).pack(anchor="w", padx=8, pady=2)
 
         buttons = ctk.CTkFrame(opts_frame, fg_color="transparent")
-        buttons.pack(fill="x", padx=8, pady=8)
+        buttons.pack(fill="x", padx=8, pady=(8, 2))
         ctk.CTkButton(buttons, text="Add folder / drive", command=self.add_source).pack(
             side="left", padx=(0, 8)
         )
@@ -274,14 +281,17 @@ class ArchiveOrganiserApp(ctk.CTk):
         ctk.CTkButton(
             buttons, text="Clear ticks", width=90, command=self.clear_source_ticks
         ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(buttons, text="Clear all", command=self.clear_sources).pack(
-            side="left", padx=(0, 8)
-        )
         ctk.CTkButton(
-            buttons, text="Reload last scan", command=self.reload_last_scan, width=130
+            buttons, text="Remove all sources…", command=self.clear_sources, width=150
         ).pack(side="left", padx=(0, 8))
+
+        actions = ctk.CTkFrame(opts_frame, fg_color="transparent")
+        actions.pack(fill="x", padx=8, pady=(2, 8))
+        ctk.CTkButton(
+            actions, text="Reload last scan", command=self.reload_last_scan, width=140
+        ).pack(side="left")
         primary_button(
-            buttons, text="Scan now", command=self.start_scan
+            actions, text="Scan now", command=self.start_scan
         ).pack(side="right")
 
         self._refresh_source_list()
@@ -399,57 +409,78 @@ class ArchiveOrganiserApp(ctk.CTk):
         self.compare_frame.grid_rowconfigure(0, weight=1)
         self.compare_frame.bind("<Configure>", self._on_compare_resize)
 
-        row = ctk.CTkFrame(tab, fg_color="transparent")
-        row.grid(row=2, column=0, sticky="ew", padx=6, pady=(0, 4))
+        select_row = ctk.CTkFrame(tab, fg_color="transparent")
+        select_row.grid(row=2, column=0, sticky="ew", padx=6, pady=(0, 2))
         ctk.CTkButton(
-            row, text="Select extras only", command=self.select_extras_in_group, width=130, height=28
-        ).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(
-            row, text="Select all", command=self.select_all_in_group, width=90, height=28
-        ).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(
-            row, text="Clear selection", command=self.clear_compare_selection, width=110, height=28
-        ).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(
-            row,
-            text="Delete all extras (every group)",
-            command=self.delete_all_extras,
-            fg_color=DANGER,
-            hover_color=DANGER_HOVER,
+            select_row,
+            text="Select extras only",
+            command=self.select_extras_in_group,
+            width=130,
             height=28,
-        ).pack(side="right", padx=(6, 0))
+        ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
-            row,
-            text="Quarantine all extras (every group)",
-            command=self.quarantine_extras,
-            fg_color=WARNING,
+            select_row, text="Select all", command=self.select_all_in_group, width=90, height=28
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            select_row,
+            text="Clear selection",
+            command=self.clear_compare_selection,
+            width=110,
             height=28,
-        ).pack(side="right", padx=(6, 0))
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(
+            select_row,
+            text="Keyboard: ← → between groups",
+            font=ctk.CTkFont(size=11),
+            text_color=MUTED,
+        ).pack(side="left", padx=(8, 0))
+
+        action_row = ctk.CTkFrame(tab, fg_color="transparent")
+        action_row.grid(row=3, column=0, sticky="ew", padx=6, pady=(0, 4))
         ctk.CTkButton(
-            row,
+            action_row,
             text="Open last quarantine",
             command=self.open_last_quarantine,
             height=28,
             width=150,
+        ).pack(side="left", padx=(0, 6))
+        primary_button(
+            action_row,
+            text="Quarantine selected",
+            command=self.quarantine_selected_compare_files,
+            height=28,
         ).pack(side="right", padx=(6, 0))
         ctk.CTkButton(
-            row,
-            text="Permanently delete selected",
+            action_row,
+            text="Delete selected",
             command=self.delete_selected_compare_files,
             fg_color=DANGER,
             hover_color=DANGER_HOVER,
             height=28,
+            width=120,
         ).pack(side="right", padx=(6, 0))
-        primary_button(
-            row,
-            text="Quarantine selected",
-            command=self.quarantine_selected_compare_files,
+        ctk.CTkButton(
+            action_row,
+            text="Quarantine all extras",
+            command=self.quarantine_extras,
+            fg_color=WARNING,
             height=28,
+            width=150,
+        ).pack(side="right", padx=(6, 0))
+        ctk.CTkButton(
+            action_row,
+            text="Delete all extras",
+            command=self.delete_all_extras,
+            fg_color=DANGER,
+            hover_color=DANGER_HOVER,
+            height=28,
+            width=130,
         ).pack(side="right", padx=(6, 0))
 
         # ← / → move between groups when the Duplicates tab is active
         self.bind_all("<Left>", self._on_duplicates_left_key, add="+")
         self.bind_all("<Right>", self._on_duplicates_right_key, add="+")
+        self._show_duplicates_empty_state()
 
     def _clear_group_list(self) -> None:
         for child in self.group_list.winfo_children():
@@ -470,6 +501,37 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._compare_vpaned = None
         self._compare_hpaned_top = None
         self._compare_hpaned_bottom = None
+
+    def _show_duplicates_empty_state(self) -> None:
+        """Friendly placeholders before Find duplicates has been run."""
+        self._clear_group_list()
+        self._clear_compare_panel()
+        tip = (
+            "Run Find duplicates on Overview after a scan.\n"
+            "Then click a group here to compare copies."
+        )
+        if self._has_scan_files():
+            tip = (
+                "Scan ready — open Overview and click Find duplicates.\n"
+                "Groups will appear in this list."
+            )
+        ctk.CTkLabel(
+            self.group_list,
+            text=tip,
+            justify="left",
+            anchor="w",
+            text_color=MUTED,
+            wraplength=200,
+        ).pack(anchor="w", padx=6, pady=8)
+        ctk.CTkLabel(
+            self.compare_frame,
+            text="Compare view is empty until you open a duplicate group.\n"
+            "Use ← Prev / Next → (or arrow keys) to move between groups.",
+            justify="left",
+            anchor="w",
+            text_color=MUTED,
+            wraplength=520,
+        ).pack(anchor="w", padx=10, pady=12)
 
     def _remember_compare_layout(self) -> None:
         """Store sash positions as fractions so they survive rebuilding the panel."""
@@ -870,7 +932,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         check_var = tk.BooleanVar(
             value=(role != "KEEP (oldest)" and not info.is_inside_archive)
         )
-        select_text = "Select for remove/delete"
+        select_text = "Mark for quarantine/delete"
         if info.is_inside_archive:
             select_text = "Inside zip (can't quarantine alone)"
             check_var.set(False)
@@ -1185,8 +1247,8 @@ class ArchiveOrganiserApp(ctk.CTk):
         ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
             layout_tools,
-            text="Clear to one",
-            width=100,
+            text="Single layout only",
+            width=130,
             height=26,
             command=self._clear_layouts_to_one,
         ).pack(side="left")
@@ -1228,7 +1290,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         ).pack(anchor="w", pady=(4, 0))
 
         # Category include + sub-folder options (collapsed by default)
-        opts = ctk.CTkScrollableFrame(left, height=260)
+        opts = ctk.CTkScrollableFrame(left, height=220)
         self.organise_advanced_frame = opts
         opts.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
@@ -1427,7 +1489,11 @@ class ArchiveOrganiserApp(ctk.CTk):
 
         self.org_box = ctk.CTkTextbox(bottom)
         self.org_box.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
-        self.org_box.insert("1.0", "File move plan appears here after Preview plan.")
+        self.org_box.insert(
+            "1.0",
+            "Organise plan appears here after Preview plan.\n"
+            "Default is Copy (safer) — originals stay until you delete them.",
+        )
         self.org_box.configure(state="disabled")
 
         row = ctk.CTkFrame(tab, fg_color="transparent")
@@ -1458,26 +1524,57 @@ class ArchiveOrganiserApp(ctk.CTk):
         self.dry_run_var = tk.BooleanVar(value=bool(self._settings.get("dry_run", True)))
         ctk.CTkCheckBox(
             row,
-            text="Dry run only (preview, do not change files)",
+            text="Dry run only (no file changes)",
             variable=self.dry_run_var,
+            command=self._sync_organise_apply_button,
         ).pack(side="right", padx=16)
 
         self._last_organise_plan = None
         self._rebuild_layout_options(recommended=["type_date"])
         self._toggle_organise_advanced()
+        self._sync_organise_apply_button()
+
+    def _sync_organise_apply_button(self) -> None:
+        """Make Apply button wording match Dry run vs real copy/move."""
+        if not hasattr(self, "btn_apply_org") or not hasattr(self, "dry_run_var"):
+            return
+        if self.dry_run_var.get():
+            self.btn_apply_org.configure(text="Run dry run")
+        else:
+            self.btn_apply_org.configure(text="Apply organise")
+        if self._organise_preview_ready:
+            self._refresh_workflow()
 
     def _toggle_organise_advanced(self) -> None:
         frame = getattr(self, "organise_advanced_frame", None)
+        left = frame.master if frame is not None else None
         if frame is None:
             return
         if self.show_advanced_org_var.get():
-            frame.grid(row=6, column=0, sticky="nsew", padx=6, pady=(0, 6))
+            # Prefer advanced scrolling; keep layout list from collapsing away
+            if left is not None:
+                try:
+                    left.grid_rowconfigure(3, weight=0)
+                    left.grid_rowconfigure(6, weight=1)
+                except Exception:
+                    pass
             try:
-                frame.master.grid_rowconfigure(6, weight=1)
+                self.layout_check_frame.configure(height=140)
             except Exception:
                 pass
+            frame.grid(row=6, column=0, sticky="nsew", padx=6, pady=(0, 6))
         else:
             frame.grid_remove()
+            if left is not None:
+                try:
+                    left.grid_rowconfigure(3, weight=1)
+                    left.grid_rowconfigure(6, weight=0)
+                except Exception:
+                    pass
+            try:
+                self.layout_check_frame.configure(height=220)
+            except Exception:
+                pass
 
     def _rebuild_layout_options(self, recommended: Optional[list[str]] = None) -> None:
         """Rebuild layout checkboxes; tick one or more to combine folder structures."""
@@ -1735,12 +1832,12 @@ class ArchiveOrganiserApp(ctk.CTk):
 
 4. Organise tab
    • Destination must be outside your scan sources for real copy/move.
-   • Tick layouts (each shows a short description). Use recommended / Clear to one.
+   • Tick layouts (each shows a short description). Use recommended / Single layout only.
    • Combine order is shown under the list (folders nest when you tick more than one).
    • New presets: Keep source folders · Shallow by type.
    • Advanced: media date depth (none / year / year+month), per-category folder modes,
      archive age days, and optional Custom structure text.
-   • Keep Copy + Dry run on at first. Preview plan, then Apply.
+   • Keep Copy + Dry run on at first. Preview plan, then Run dry run / Apply organise.
    • Custom structure cannot mix with other layouts (Custom alone).
 
 LARGE DRIVES (1TB+)
@@ -1860,7 +1957,14 @@ PRIVACY & SAFETY
 
     def _refresh_workflow(self) -> None:
         """Clear next-step tip in the banner based on current stage."""
-        if self.dup_report and self.dup_report.groups:
+        if self._organise_preview_ready and self._has_scan_files():
+            if hasattr(self, "dry_run_var") and self.dry_run_var.get():
+                text = (
+                    "Next: review the Organise plan, then untick Dry run and click Apply organise."
+                )
+            else:
+                text = "Next: click Apply organise to copy/move files (Preview plan must match)."
+        elif self.dup_report and self.dup_report.groups:
             text = (
                 "Next: compare groups, then Quarantine extras "
                 "(keeps the oldest file in each group)."
@@ -2087,9 +2191,9 @@ PRIVACY & SAFETY
         )
         self.scan_result = result
         self.dup_report = None
+        self._organise_preview_ready = False
         self._update_overview()
-        self._clear_group_list()
-        self._clear_compare_panel()
+        self._show_duplicates_empty_state()
         self.dup_summary.configure(
             text="Loaded last scan. Click Find duplicates on Overview (Exact is safest for huge drives)."
         )
@@ -2112,8 +2216,15 @@ PRIVACY & SAFETY
         if not self.source_paths:
             ctk.CTkLabel(
                 self.source_list_frame,
-                text="(no folders added yet — click Add folder / drive)",
+                text=(
+                    "No folders yet.\n"
+                    "1) Click Add folder / drive\n"
+                    "2) Click Scan now\n"
+                    "Or use Reload last scan if you scanned before."
+                ),
                 text_color=("gray40", "gray70"),
+                justify="left",
+                anchor="w",
             ).pack(anchor="w", padx=6, pady=8)
             return
 
@@ -2122,9 +2233,8 @@ PRIVACY & SAFETY
             row.pack(fill="x", padx=4, pady=2)
             var = tk.BooleanVar(value=False)
             self._source_check_vars[path] = var
-            ctk.CTkCheckBox(row, text="", variable=var, width=28).pack(side="left")
-            ctk.CTkLabel(row, text=path, anchor="w").pack(
-                side="left", fill="x", expand=True, padx=(4, 0)
+            ctk.CTkCheckBox(row, text=path, variable=var, anchor="w").pack(
+                side="left", fill="x", expand=True
             )
             ctk.CTkButton(
                 row,
@@ -2185,6 +2295,15 @@ PRIVACY & SAFETY
             var.set(False)
 
     def clear_sources(self) -> None:
+        if not self.source_paths:
+            return
+        ok = messagebox.askyesno(
+            APP_TITLE,
+            f"Remove all {len(self.source_paths)} source folder(s) from the list?\n\n"
+            "This does not delete files on disk — it only clears the scan list.",
+        )
+        if not ok:
+            return
         self.source_paths.clear()
         self._refresh_source_list()
         self._set_status("Cleared source list.")
@@ -2257,9 +2376,9 @@ PRIVACY & SAFETY
         self._set_busy(False)
         self.scan_result = result
         self.dup_report = None
+        self._organise_preview_ready = False
         self._update_overview()
-        self._clear_group_list()
-        self._clear_compare_panel()
+        self._show_duplicates_empty_state()
         self.dup_summary.configure(
             text="Scan ready. Click Find duplicates on Overview (Exact is safest for huge drives)."
         )
@@ -2453,7 +2572,7 @@ PRIVACY & SAFETY
                 f"{report.duplicate_file_count} extras · "
                 f"~{format_bytes(report.wasted_bytes)} reclaimable · "
                 f"took {took}"
-                f"{note_txt}  ·  Click a group to compare"
+                f"{note_txt}  ·  Click a group · ← → Prev/Next"
             )
         )
         # Append timing to Overview report
@@ -2461,6 +2580,7 @@ PRIVACY & SAFETY
             self._append_overview_timing_block(report)
 
         self.tabs.set("Duplicates")
+        self._organise_preview_ready = False
         self.workflow_banner.configure(
             text="Next: compare groups, then Quarantine extras (oldest file is kept). Prefer quarantine over delete."
         )
@@ -2644,10 +2764,9 @@ PRIVACY & SAFETY
         self._write_box(self.org_box, "\n".join(lines))
         self._organise_preview_key = self._organise_plan_key(dest, layout_ids, options)
         self._last_organise_plan = plan
+        self._organise_preview_ready = True
         self._set_status(f"Organise preview ({label}): {len(plan.items)} actions planned.")
-        self.workflow_banner.configure(
-            text="Next: review the plan (Browse dry-run…), then untick Dry run and click Apply."
-        )
+        self._refresh_workflow()
         self._persist_settings()
 
     def _organise_plan_key(self, dest: str, layout_ids, options: OrganiseOptions) -> str:
@@ -2837,8 +2956,14 @@ PRIVACY & SAFETY
         ]
         self._write_box(self.org_box, "\n".join(header + log[:500]))
         self._set_status(f"{mode} finished ({layout_name}): {count} items in {took}.")
-        self._refresh_workflow()
-        if not dry:
+        if dry:
+            self._organise_preview_ready = True
+            self.workflow_banner.configure(
+                text="Dry run finished — untick Dry run, then click Apply organise to make real changes."
+            )
+        else:
+            self._organise_preview_ready = False
+            self._refresh_workflow()
             tip = (
                 "Done. Spot-check a few files in the destination, "
                 "then optionally delete originals only if you used Copy."

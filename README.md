@@ -105,7 +105,7 @@ Each session includes a `manifest.json` listing original paths. Restore by movin
 ### 5. Organise tab
 1. Choose a **destination** folder (ideally empty / a tidy drive, outside your sources).
 2. Pick one or more **folder layouts** (each shows a short description + example):
-   - **Use recommended** ticks the best fit from your scan; **Clear to one** keeps a single layout.
+   - **Use recommended** ticks the best fit from your scan; **Single layout only** keeps one layout.
    - Combine order appears under the list (extra layouts nest folder parts together).
    - Useful extras: **Keep source folders** (preserve relative paths) and **Shallow by type** (category only).
 3. Open **Show advanced options** when you need finer control:
@@ -113,7 +113,7 @@ Each session includes a `manifest.json` listing original paths. Restore by movin
    - **Per-category folders:** follow layout, flat, by year, by year+month, or by extension
    - Custom structure text (when layout = Custom): `Photos = MyArchive/Photos/{year}/{month}`
 4. Drag the **sashes** to resize options, preview, and plan panes.
-5. Keep **Dry run only** ticked → **Preview plan** → **Browse dry-run…** (file-manager view of the plan).
+5. Keep **Dry run only** ticked → **Preview plan** → **Run dry run** / **Browse dry-run…**.
 6. When ready, untick Dry run and click **Apply organise**.
 
 ---
