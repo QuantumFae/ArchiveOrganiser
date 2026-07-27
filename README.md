@@ -7,6 +7,9 @@ A **private, local** desktop app to help you clean up personal files spread acro
 - Uses **quarantine** instead of permanent delete
 - Does **not** upload your files anywhere
 
+**GitHub (account: QuantumFae):** https://github.com/QuantumFae/ArchiveOrganiser  
+**Latest release:** https://github.com/QuantumFae/ArchiveOrganiser/releases/tag/v1.0.0
+
 ---
 
 ## Requirements
