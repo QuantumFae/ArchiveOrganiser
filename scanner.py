@@ -254,19 +254,27 @@ def scan_paths(
     status_cb: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
     options: Optional[ScanOptions] = None,
+    store_path: Optional[Path] = None,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> ScanResult:
     """
     Walk every chosen folder/drive and collect file info.
     Does not move or delete anything.
+
+    If store_path is set, the SQLite index is kept on disk for reload later.
+    progress_cb(current_root_index, total_roots) reports coarse scan progress.
     """
     opts = options or ScanOptions()
     result = ScanResult()
     store: Optional[ScanStore] = None
     if opts.use_sqlite:
-        store = ScanStore()
+        store = ScanStore(store_path)
+        if store_path is not None:
+            store.clear_files()
         result.store = store
     timer = ElapsedTimer()
     last_status_at = 0.0
+    total_roots = max(1, len(roots))
 
     def maybe_status(msg: str, force: bool = False) -> None:
         nonlocal last_status_at
@@ -277,7 +285,9 @@ def scan_paths(
             status_cb(timer.stamp(msg))
             last_status_at = now
 
-    for root in roots:
+    for root_index, root in enumerate(roots, start=1):
+        if progress_cb:
+            progress_cb(root_index - 1, total_roots)
         root_path = Path(root).expanduser().resolve()
         if not root_path.exists():
             result.errors.append(f"Path not found: {root}")
@@ -292,7 +302,10 @@ def scan_paths(
             result.errors.append(f"Could not read {root_path}: {exc}")
             continue
 
-        maybe_status(f"Scanning: {root_path}", force=True)
+        maybe_status(
+            f"Scanning source {root_index}/{total_roots}: {root_path}",
+            force=True,
+        )
 
         for dirpath, dirnames, filenames in os.walk(root_path, followlinks=False):
             if should_cancel and should_cancel():
@@ -407,6 +420,8 @@ def scan_paths(
             f"{format_bytes(result.total_bytes)} so far",
             force=True,
         )
+        if progress_cb:
+            progress_cb(root_index, total_roots)
 
     if store:
         store.flush()
@@ -414,6 +429,8 @@ def scan_paths(
         result.total_bytes = store.total_bytes()
 
     result.duration_seconds = timer.seconds()
+    if progress_cb:
+        progress_cb(total_roots, total_roots)
     if status_cb:
         extra = f" (including {result.archive_members} inside zips)" if result.archive_members else ""
         cross = (

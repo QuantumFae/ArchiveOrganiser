@@ -41,6 +41,30 @@ source .venv/bin/activate
 python3 main.py
 ```
 
+### One-click desktop launcher
+
+```bash
+cd /home/p/ArchiveOrganiser
+chmod +x scripts/*.sh
+./scripts/install_desktop_launcher.sh
+```
+
+Then open **Archive Organiser** from your app menu.
+
+### Remembered settings & last scan
+
+- Sources, destination, layout ticks, window size, and appearance are saved under `~/.config/ArchiveOrganiser/`.
+- The last SQLite scan is kept under `~/.local/share/ArchiveOrganiser/last_scan.sqlite` and reloads on launch (or via **Reload last scan**).
+
+### Optional standalone build (other PCs)
+
+```bash
+pip install pyinstaller
+./scripts/build_standalone.sh
+```
+
+Copy `dist/ArchiveOrganiser/` to another Linux machine. A single `.AppImage` wrapper can be added later if you want one file.
+
 ---
 
 ## How to use (recommended order)

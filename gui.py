@@ -5,6 +5,9 @@ Private by design: everything runs on your computer.
 No files are uploaded anywhere.
 """
 
+import json
+import os
+import re
 import threading
 import time
 import tkinter as tk
@@ -14,6 +17,7 @@ from typing import Optional
 
 import customtkinter as ctk
 
+from app_settings import last_scan_db_path, load_settings, save_settings
 from duplicates import (
     DuplicateGroup,
     DuplicateReport,
@@ -22,7 +26,6 @@ from duplicates import (
 )
 from folder_picker import ask_folder
 from helpers import format_duration, open_containing_folder
-import os
 from models import FileInfo, ScanResult
 from best_practices import build_inventory_text, organisation_advice
 from custom_structure import DEFAULT_CUSTOM_TEMPLATE
@@ -52,12 +55,20 @@ from organiser import (
 )
 from plan_browser import PlanBrowserWindow
 from preview import load_preview_for_info
-from quarantine import format_bytes, move_to_quarantine, permanently_delete, quarantine_root
+from quarantine import (
+    format_bytes,
+    latest_quarantine_session,
+    move_to_quarantine,
+    permanently_delete,
+    quarantine_root,
+)
+from scan_store import ScanStore
 from scanner import ScanOptions, scan_paths
 
 
 APP_TITLE = "Archive Organiser"
 APP_SIZE = "1280x800"
+_PROGRESS_FRACTION_RE = re.compile(r"(?<!\d)(\d+)\s*/\s*(\d+)(?!\d)")
 
 
 class ArchiveOrganiserApp(ctk.CTk):
@@ -67,8 +78,16 @@ class ArchiveOrganiserApp(ctk.CTk):
         self.geometry(APP_SIZE)
         self.minsize(900, 600)
 
+        self._settings = load_settings()
+        geometry = str(self._settings.get("window_geometry") or APP_SIZE)
+        try:
+            self.geometry(geometry)
+        except tk.TclError:
+            self.geometry(APP_SIZE)
+
         apply_theme()
-        ctk.set_appearance_mode("System")
+        appearance = str(self._settings.get("appearance") or "System")
+        ctk.set_appearance_mode(appearance)
 
         self.source_paths: list[str] = []
         self.scan_result: Optional[ScanResult] = None
@@ -100,9 +119,22 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._group_list_shown = 0
         self._group_page_size = 80
         self._workflow_banner: Optional[ctk.CTkLabel] = None
+        self._progress_mode = "indeterminate"
+        self._last_quarantine_session = str(
+            self._settings.get("last_quarantine_session") or ""
+        )
+        self._saved_layout_ids: list[str] = list(
+            self._settings.get("layout_ids") or []
+        )
+        self._geometry_save_job: Optional[str] = None
 
         self._build_layout()
+        self._apply_saved_preferences()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<Configure>", self._on_window_configure, add="+")
+        self.after(200, self._try_autoload_last_scan)
         self._set_status("Ready. Add folders or drives, then Scan.")
+        self._refresh_workflow()
 
     # ---------- layout ----------
 
@@ -127,7 +159,7 @@ class ArchiveOrganiserApp(ctk.CTk):
             text_color=MUTED,
             anchor="w",
         ).grid(row=0, column=1, sticky="w", padx=(12, 8))
-        self.appearance_var = tk.StringVar(value="System")
+        self.appearance_var = tk.StringVar(value=str(self._settings.get("appearance") or "System"))
         ctk.CTkOptionMenu(
             header,
             values=["System", "Light", "Dark"],
@@ -141,10 +173,11 @@ class ArchiveOrganiserApp(ctk.CTk):
             self,
             text="Start on Sources: add a folder or drive, then Scan now.",
             anchor="w",
-            font=ctk.CTkFont(size=12),
+            font=ctk.CTkFont(size=12, weight="bold"),
             text_color=MUTED,
         )
         self.workflow_banner.grid(row=1, column=0, sticky="ew", padx=12, pady=(2, 0))
+        self._workflow_banner = self.workflow_banner
 
         self.tabs = ctk.CTkTabview(self)
         self.tabs.grid(row=2, column=0, sticky="nsew", padx=8, pady=(2, 2))
@@ -207,8 +240,8 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._source_check_vars: dict[str, tk.BooleanVar] = {}
         self._source_empty_label: Optional[ctk.CTkLabel] = None
 
-        self.include_junk_var = tk.BooleanVar(value=False)
-        self.scan_zips_var = tk.BooleanVar(value=False)
+        self.include_junk_var = tk.BooleanVar(value=bool(self._settings.get("include_junk")))
+        self.scan_zips_var = tk.BooleanVar(value=bool(self._settings.get("scan_zips")))
         ctk.CTkCheckBox(
             opts_frame,
             text="Include junk / system folders (.Trash, System Volume Information, dot-folders, …)",
@@ -237,6 +270,9 @@ class ArchiveOrganiserApp(ctk.CTk):
         ctk.CTkButton(buttons, text="Clear all", command=self.clear_sources).pack(
             side="left", padx=(0, 8)
         )
+        ctk.CTkButton(
+            buttons, text="Reload last scan", command=self.reload_last_scan, width=130
+        ).pack(side="left", padx=(0, 8))
         primary_button(
             buttons, text="Scan now", command=self.start_scan
         ).pack(side="right")
@@ -381,6 +417,13 @@ class ArchiveOrganiserApp(ctk.CTk):
             command=self.quarantine_extras,
             fg_color=WARNING,
             height=28,
+        ).pack(side="right", padx=(6, 0))
+        ctk.CTkButton(
+            row,
+            text="Open last quarantine",
+            command=self.open_last_quarantine,
+            height=28,
+            width=150,
         ).pack(side="right", padx=(6, 0))
         ctk.CTkButton(
             row,
@@ -1023,6 +1066,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         # Also match by original Path objects used in the report
         paths |= {c.path for c in chosen}
         self._remove_paths_from_reports(paths)
+        self._remember_quarantine_session(session)
         messagebox.showinfo(APP_TITLE, f"Quarantined to:\n{session}\n\n" + "\n".join(log[:8]))
         self._set_status(f"Quarantined {len(chosen)} selected file(s).")
 
@@ -1075,6 +1119,9 @@ class ArchiveOrganiserApp(ctk.CTk):
         ctk.CTkLabel(dest_row, text="Destination:").grid(row=0, column=0, padx=(0, 8))
         self.dest_entry = ctk.CTkEntry(dest_row, placeholder_text="Choose a tidy destination folder")
         self.dest_entry.grid(row=0, column=1, sticky="ew")
+        saved_dest = str(self._settings.get("destination") or "")
+        if saved_dest:
+            self.dest_entry.insert(0, saved_dest)
         ctk.CTkButton(dest_row, text="Browse…", width=100, command=self.choose_dest).grid(
             row=0, column=2, padx=(8, 0)
         )
@@ -1128,7 +1175,9 @@ class ArchiveOrganiserApp(ctk.CTk):
 
         safety = ctk.CTkFrame(left, fg_color="transparent")
         safety.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 4))
-        self.copy_instead_var = tk.BooleanVar(value=True)
+        self.copy_instead_var = tk.BooleanVar(
+            value=bool(self._settings.get("copy_instead_of_move", True))
+        )
         ctk.CTkCheckBox(
             safety,
             text="Copy files (safer) instead of moving",
@@ -1296,7 +1345,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         )
         self.btn_apply_org.pack(side="right")
 
-        self.dry_run_var = tk.BooleanVar(value=True)
+        self.dry_run_var = tk.BooleanVar(value=bool(self._settings.get("dry_run", True)))
         ctk.CTkCheckBox(
             row,
             text="Dry run only (preview, do not change files)",
@@ -1344,6 +1393,9 @@ class ArchiveOrganiserApp(ctk.CTk):
 
         best = ordered_ids[0] if ordered_ids else "type_date"
         any_prev = any(previous.values())
+        saved = {
+            lid for lid in (self._saved_layout_ids or []) if lid in ordered_ids
+        }
 
         for row_i, layout_id in enumerate(ordered_ids):
             preset = get_layout(layout_id)
@@ -1354,6 +1406,8 @@ class ArchiveOrganiserApp(ctk.CTk):
             text = f"{preset.name}{mark}{useful}"
             if any_prev:
                 default_on = bool(previous.get(layout_id, False))
+            elif saved:
+                default_on = layout_id in saved
             else:
                 default_on = layout_id == best
             var = tk.BooleanVar(value=default_on)
@@ -1394,6 +1448,7 @@ class ArchiveOrganiserApp(ctk.CTk):
             fallback = "type_date" if "type_date" in self.layout_vars else next(iter(self.layout_vars))
             self.layout_vars[fallback].set(True)
         self._update_layout_visual()
+        self._persist_settings()
 
     def _current_organise_options(self) -> OrganiseOptions:
         selected = {cat for cat, var in self.category_vars.items() if var.get()}
@@ -1483,8 +1538,10 @@ class ArchiveOrganiserApp(ctk.CTk):
 
 1. Sources tab
    • Add folder / drive. Tick rows to select; Remove selected / Open as needed.
+   • Your sources, destination, layouts, and window size are remembered next launch.
    • Leave “Scan inside .zip” off for huge drives (you can turn it on for small libraries).
-   • Click Scan now. Large libraries use an on-disk SQLite index so RAM stays sane.
+   • Click Scan now. Results are saved on disk — use Reload last scan to avoid re-scanning.
+   • One-click start: run scripts/install_desktop_launcher.sh once.
 
 2. Overview tab
    • Read counts, size, and timing. Save a report if you like.
@@ -1494,22 +1551,22 @@ class ArchiveOrganiserApp(ctk.CTk):
 3. Duplicates tab
    • Left: duplicate groups (loads in pages — use Load more on huge results).
    • Click a group for side-by-side compare. Drag sashes to resize panes.
-   • Every file shows a best-effort Preview (image/page/frame/waveform/text) or a
-     type card + binary sample — not a full proprietary document renderer.
-   • Prefer Quarantine selected. Permanent delete needs two confirmations.
+   • Prefer Quarantine (all extras or selected). Confirmations show count + size + “oldest kept”.
+   • Open last quarantine jumps to the newest quarantine session folder.
    • Zip members can be compared; quarantine applies to real disk files only.
 
 4. Organise tab
    • Destination must be outside your scan sources for real copy/move.
    • Tick one or more folder layouts to combine (folders nest together).
    • Keep Copy + Dry run on at first. Preview plan, then Apply.
+   • After Preview, the top banner reminds you to Apply.
    • Advanced / custom options can stay collapsed until you need them.
    • Custom structure cannot mix with other layouts (Custom alone).
 
 LARGE DRIVES (1TB+)
 • Exact duplicates: size buckets → partial CRC → full CRC only on collisions.
 • Stay on one mount (default). Zip listing is capped per archive and overall.
-• Cancel stays available; status shows file counts and sizes while working.
+• Cancel stays available; status and progress show n/total when known (hash / organise).
 
 PRIVACY & SAFETY
 • Nothing is uploaded. Prefer quarantine. Test on a small folder first.
@@ -1524,6 +1581,7 @@ PRIVACY & SAFETY
         Update the status bar.
         While a long task is running, the GUI owns the live clock so the
         time keeps advancing even when the worker is busy inside a big zip.
+        Also upgrades the progress bar when the message includes n/total.
         """
         if self._busy:
             detail = text.strip()
@@ -1535,8 +1593,38 @@ PRIVACY & SAFETY
                 self._busy_detail = detail
             elapsed = format_duration(time.monotonic() - self._busy_started)
             self.status_label.configure(text=f"[{elapsed}] {self._busy_detail}")
+            self._maybe_update_progress_from_text(detail)
         else:
             self.status_label.configure(text=text)
+
+    def _worker_status(self, msg: str) -> None:
+        """Thread-safe status update used by background workers."""
+        self.after(0, self._set_status, msg)
+
+    def _worker_progress(self, current: int, total: int) -> None:
+        """Thread-safe determinate progress (e.g. scan sources 1/3)."""
+        self.after(0, self._set_progress_counts, current, total)
+
+    def _maybe_update_progress_from_text(self, text: str) -> None:
+        match = _PROGRESS_FRACTION_RE.search(text or "")
+        if not match:
+            return
+        current = int(match.group(1))
+        total = int(match.group(2))
+        self._set_progress_counts(current, total)
+
+    def _set_progress_counts(self, current: int, total: int) -> None:
+        if total <= 0:
+            return
+        fraction = max(0.0, min(1.0, float(current) / float(total)))
+        if self._progress_mode != "determinate":
+            try:
+                self.progress.stop()
+            except Exception:
+                pass
+            self.progress.configure(mode="determinate")
+            self._progress_mode = "determinate"
+        self.progress.set(fraction)
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -1545,12 +1633,20 @@ PRIVACY & SAFETY
             self._busy_started = time.monotonic()
             self._busy_detail = "Working…"
             self.cancel_btn.configure(state="normal")
+            self._progress_mode = "indeterminate"
+            self.progress.configure(mode="indeterminate")
+            self.progress.set(0)
             self.progress.start()
             self._schedule_busy_tick()
         else:
             self._cancel_busy_tick()
             self.cancel_btn.configure(state="disabled")
-            self.progress.stop()
+            try:
+                self.progress.stop()
+            except Exception:
+                pass
+            self.progress.configure(mode="determinate")
+            self._progress_mode = "determinate"
             self.progress.set(0)
 
     def _schedule_busy_tick(self) -> None:
@@ -1581,6 +1677,221 @@ PRIVACY & SAFETY
 
     def _should_cancel(self) -> bool:
         return self._cancel_flag
+
+    def _refresh_workflow(self) -> None:
+        """Clear next-step tip in the banner based on current stage."""
+        if self.dup_report and self.dup_report.groups:
+            text = (
+                "Next: compare groups, then Quarantine extras "
+                "(keeps the oldest file in each group)."
+            )
+        elif self._has_scan_files():
+            text = (
+                "Next: open Overview and click Find duplicates "
+                "(Exact is safest for huge drives)."
+            )
+        elif self.source_paths:
+            text = "Next: click Scan now on Sources (or Reload last scan if you scanned before)."
+        else:
+            text = "Start on Sources: add a folder or drive, then Scan now."
+        self.workflow_banner.configure(text=text)
+
+    def _apply_saved_preferences(self) -> None:
+        """Restore sources and related choices after the UI widgets exist."""
+        saved_sources = [
+            str(p) for p in (self._settings.get("source_paths") or []) if str(p).strip()
+        ]
+        self.source_paths = saved_sources
+        self._refresh_source_list()
+        if self._saved_layout_ids and getattr(self, "layout_vars", None):
+            for lid, var in self.layout_vars.items():
+                var.set(lid in self._saved_layout_ids)
+
+    def _collect_settings(self) -> dict:
+        layout_ids = []
+        if getattr(self, "layout_vars", None):
+            layout_ids = [lid for lid, var in self.layout_vars.items() if var.get()]
+        return {
+            "source_paths": list(self.source_paths),
+            "destination": self.dest_entry.get().strip() if hasattr(self, "dest_entry") else "",
+            "layout_ids": layout_ids,
+            "window_geometry": self.geometry(),
+            "appearance": self.appearance_var.get() if hasattr(self, "appearance_var") else "System",
+            "include_junk": bool(self.include_junk_var.get()) if hasattr(self, "include_junk_var") else False,
+            "scan_zips": bool(self.scan_zips_var.get()) if hasattr(self, "scan_zips_var") else False,
+            "copy_instead_of_move": bool(self.copy_instead_var.get())
+            if hasattr(self, "copy_instead_var")
+            else True,
+            "dry_run": bool(self.dry_run_var.get()) if hasattr(self, "dry_run_var") else True,
+            "last_quarantine_session": self._last_quarantine_session or "",
+            "last_scan_db": str(last_scan_db_path()),
+        }
+
+    def _persist_settings(self) -> None:
+        try:
+            save_settings(self._collect_settings())
+        except OSError:
+            pass
+
+    def _on_window_configure(self, _event=None) -> None:
+        if self._geometry_save_job is not None:
+            try:
+                self.after_cancel(self._geometry_save_job)
+            except Exception:
+                pass
+        self._geometry_save_job = self.after(800, self._persist_settings)
+
+    def _on_close(self) -> None:
+        self._persist_settings()
+        # Keep the on-disk scan DB; only drop the connection.
+        store = self.scan_result.store if self.scan_result else None
+        if store is not None:
+            try:
+                store.flush()
+                store.commit()
+            except Exception:
+                pass
+        self.destroy()
+
+    def _close_current_store(self) -> None:
+        if not self.scan_result or self.scan_result.store is None:
+            return
+        try:
+            self.scan_result.store.close()
+        except Exception:
+            pass
+        self.scan_result.store = None
+
+    def _remember_quarantine_session(self, session: Path) -> None:
+        self._last_quarantine_session = str(session)
+        self._persist_settings()
+
+    def open_last_quarantine(self) -> None:
+        session: Optional[Path] = None
+        if self._last_quarantine_session:
+            candidate = Path(self._last_quarantine_session)
+            if candidate.exists():
+                session = candidate
+        if session is None:
+            session = latest_quarantine_session()
+        if session is None or not session.exists():
+            messagebox.showinfo(
+                APP_TITLE,
+                "No quarantine session found yet.\n\n"
+                f"Quarantine folder:\n{quarantine_root()}",
+            )
+            return
+        err = open_containing_folder(session)
+        if err:
+            messagebox.showerror(APP_TITLE, err)
+            return
+        self._set_status(f"Opened quarantine session: {session}")
+
+    def _extras_summary_text(self, extras: list[FileInfo], action: str) -> str:
+        count = len(extras)
+        reclaim = sum(e.size for e in extras)
+        groups = len(self.dup_report.groups) if self.dup_report else 0
+        return (
+            f"{action}\n\n"
+            f"Extra copies to remove: {count}\n"
+            f"Total size: ~{format_bytes(reclaim)}\n"
+            f"Duplicate groups involved: {groups}\n"
+            f"Kept in each group: the oldest file (KEEP)\n"
+            "Zip members are skipped (cannot remove inside a zip alone).\n"
+        )
+
+    def _try_autoload_last_scan(self) -> None:
+        """Quietly reload the last SQLite scan if it still exists."""
+        if self._busy or self._has_scan_files():
+            return
+        db = last_scan_db_path()
+        if not db.exists():
+            self._refresh_workflow()
+            return
+        try:
+            self._load_scan_from_db(db, announce=True)
+        except Exception as exc:
+            self._set_status(f"Could not reload last scan: {exc}")
+            self._refresh_workflow()
+
+    def reload_last_scan(self) -> None:
+        if self._busy:
+            return
+        db = last_scan_db_path()
+        if not db.exists():
+            messagebox.showinfo(
+                APP_TITLE,
+                "No saved scan found yet.\n\n"
+                "Run Scan now once — results are kept for the next launch.",
+            )
+            return
+        try:
+            self._load_scan_from_db(db, announce=True)
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Could not reload last scan:\n{exc}")
+
+    def _load_scan_from_db(self, db_path: Path, announce: bool = False) -> None:
+        self._close_current_store()
+        store = ScanStore(db_path)
+        file_count = store.count()
+        if file_count <= 0:
+            store.close()
+            raise RuntimeError("Saved scan database is empty.")
+
+        sources_raw = store.get_meta("sources_json", "[]")
+        try:
+            sources = json.loads(sources_raw)
+            if isinstance(sources, list) and sources:
+                self.source_paths = [str(p) for p in sources]
+                self._refresh_source_list()
+        except json.JSONDecodeError:
+            pass
+
+        include_junk = store.get_meta("include_junk", "0") == "1"
+        scan_zips = store.get_meta("scan_zips", "0") == "1"
+        if hasattr(self, "include_junk_var"):
+            self.include_junk_var.set(include_junk)
+        if hasattr(self, "scan_zips_var"):
+            self.scan_zips_var.set(scan_zips)
+
+        duration = 0.0
+        try:
+            duration = float(store.get_meta("duration_seconds", "0") or "0")
+        except ValueError:
+            duration = 0.0
+        archive_members = 0
+        try:
+            archive_members = int(store.get_meta("archive_members", "0") or "0")
+        except ValueError:
+            archive_members = 0
+
+        result = ScanResult(
+            files=[],
+            errors=[],
+            skipped=0,
+            archive_members=archive_members,
+            duration_seconds=duration,
+            total_bytes=store.total_bytes(),
+            file_count=file_count,
+            store=store,
+        )
+        self.scan_result = result
+        self.dup_report = None
+        self._update_overview()
+        self._clear_group_list()
+        self._clear_compare_panel()
+        self.dup_summary.configure(
+            text="Loaded last scan. Click Find duplicates on Overview (Exact is safest for huge drives)."
+        )
+        self._refresh_layout_options_from_scan()
+        self.tabs.set("Overview")
+        self._refresh_workflow()
+        if announce:
+            self._set_status(
+                f"Loaded last scan: {file_count} files from {db_path.name} "
+                "(no re-scan needed)."
+            )
+        self._persist_settings()
 
     def _refresh_source_list(self) -> None:
         """Rebuild the selectable source checklist."""
@@ -1636,6 +1947,8 @@ PRIVACY & SAFETY
         self.source_paths.append(path)
         self._refresh_source_list()
         self._set_status(f"Added: {path}")
+        self._refresh_workflow()
+        self._persist_settings()
 
     def remove_selected_sources(self) -> None:
         selected = [p for p, var in self._source_check_vars.items() if var.get()]
@@ -1650,6 +1963,8 @@ PRIVACY & SAFETY
                 self.source_paths.remove(path)
         self._refresh_source_list()
         self._set_status(f"Removed {len(selected)} source(s).")
+        self._refresh_workflow()
+        self._persist_settings()
 
     def select_all_sources(self) -> None:
         for var in self._source_check_vars.values():
@@ -1663,6 +1978,8 @@ PRIVACY & SAFETY
         self.source_paths.clear()
         self._refresh_source_list()
         self._set_status("Cleared source list.")
+        self._refresh_workflow()
+        self._persist_settings()
 
     def _on_appearance_change(self, mode: str) -> None:
         ctk.set_appearance_mode(mode)
@@ -1672,6 +1989,7 @@ PRIVACY & SAFETY
                 self.dup_paned.configure(bg=paned_bg())
         except Exception:
             pass
+        self._persist_settings()
 
     def _has_scan_files(self) -> bool:
         if not self.scan_result:
@@ -1691,6 +2009,9 @@ PRIVACY & SAFETY
         if not self.source_paths:
             messagebox.showwarning(APP_TITLE, "Add at least one folder or drive first.")
             return
+        self._persist_settings()
+        self._close_current_store()
+        self.scan_result = None
         self._set_busy(True)
         self._set_status("Scanning…")
         threading.Thread(target=self._scan_worker, daemon=True).start()
@@ -1700,12 +2021,26 @@ PRIVACY & SAFETY
             include_junk_system=self.include_junk_var.get(),
             scan_zip_contents=self.scan_zips_var.get(),
         )
+        db_path = last_scan_db_path()
         result = scan_paths(
             self.source_paths,
-            status_cb=lambda msg: self.after(0, self._set_status, msg),
+            status_cb=self._worker_status,
             should_cancel=self._should_cancel,
             options=options,
+            store_path=db_path,
+            progress_cb=self._worker_progress,
         )
+        store = result.store
+        if store is not None:
+            try:
+                store.set_meta("sources_json", json.dumps(self.source_paths))
+                store.set_meta("include_junk", "1" if options.include_junk_system else "0")
+                store.set_meta("scan_zips", "1" if options.scan_zip_contents else "0")
+                store.set_meta("duration_seconds", str(result.duration_seconds))
+                store.set_meta("archive_members", str(result.archive_members))
+                store.set_meta("total_bytes", str(result.total_bytes))
+            except Exception:
+                pass
         self.after(0, self._scan_done, result)
 
     def _scan_done(self, result: ScanResult) -> None:
@@ -1721,11 +2056,12 @@ PRIVACY & SAFETY
         self._refresh_layout_options_from_scan()
         self.tabs.set("Overview")
         self.workflow_banner.configure(
-            text="Next: review Overview, then Find duplicates (Exact). Open Duplicates to compare."
+            text="Next: click Find duplicates on Overview (Exact). Then open Duplicates to compare."
         )
         took = format_duration(result.duration_seconds)
         n = result.file_count or len(result.files)
         self._set_status(f"Scan finished: {n} files in {took}.")
+        self._persist_settings()
 
     def _update_overview(self) -> None:
         if not self.scan_result:
@@ -1888,7 +2224,7 @@ PRIVACY & SAFETY
         report = find_duplicate_matches(
             files,
             options=options,
-            status_cb=lambda msg: self.after(0, self._set_status, msg),
+            status_cb=self._worker_status,
             should_cancel=self._should_cancel,
             store=store,
         )
@@ -1916,7 +2252,7 @@ PRIVACY & SAFETY
 
         self.tabs.set("Duplicates")
         self.workflow_banner.configure(
-            text="Duplicates ready — click a group to compare. Prefer Quarantine over permanent delete."
+            text="Next: compare groups, then Quarantine extras (oldest file is kept). Prefer quarantine over delete."
         )
         self.update_idletasks()
         try:
@@ -1963,24 +2299,28 @@ PRIVACY & SAFETY
             return
         count = len(extras)
         qpath = quarantine_root()
+        summary = self._extras_summary_text(extras, "QUARANTINE ALL DUPLICATE EXTRAS")
         ok = messagebox.askyesno(
             APP_TITLE,
-            f"Move {count} extra copies (from every group) to quarantine?\n\n"
-            f"Destination:\n{qpath}\n\n"
-            "The oldest file in each group is kept. Files are moved, not permanently deleted.",
+            summary
+            + f"\nDestination:\n{qpath}\n\n"
+            "Files are moved (not permanently deleted). Continue?",
         )
         if not ok:
             return
         session, log = move_to_quarantine([e.path for e in extras])
         paths = {e.path for e in extras}
         self._remove_paths_from_reports(paths)
+        self._remember_quarantine_session(session)
         messagebox.showinfo(
             APP_TITLE,
             f"Quarantine session created:\n{session}\n\n"
-            "A manifest.json file lists original locations.\n\n"
+            "A manifest.json file lists original locations.\n"
+            "Use “Open last quarantine” anytime.\n\n"
             + "\n".join(log[:6]),
         )
         self._set_status(f"Quarantined {count} files → {session}")
+        self._refresh_workflow()
 
     def delete_all_extras(self) -> None:
         """Permanently delete every extra copy across all groups (keeps oldest KEEP)."""
@@ -1988,15 +2328,11 @@ PRIVACY & SAFETY
         if extras is None:
             return
         count = len(extras)
-        reclaim = sum(e.size for e in extras)
+        summary = self._extras_summary_text(extras, "DELETE ALL DUPLICATE EXTRAS")
         ok = messagebox.askyesno(
             APP_TITLE,
-            "DELETE ALL DUPLICATE EXTRAS\n\n"
-            f"This permanently erases {count} extra file(s) "
-            f"(~{format_bytes(reclaim)}) across every duplicate group.\n\n"
-            "The oldest file in each group is kept.\n"
-            "Zip members are skipped (cannot delete inside a zip alone).\n\n"
-            "This cannot be undone by this app.\n"
+            summary
+            + "\nThis cannot be undone by this app.\n"
             "Prefer “Quarantine all extras” if you might want files back.\n\n"
             "Continue?",
         )
@@ -2016,6 +2352,7 @@ PRIVACY & SAFETY
             f"Deleted {count} extra duplicate(s).\n\n" + "\n".join(log[:12]),
         )
         self._set_status(f"Permanently deleted {count} extra duplicate(s).")
+        self._refresh_workflow()
 
     def _all_disk_extras(self) -> Optional[list[FileInfo]]:
         """Extra (non-KEEP) on-disk files from every group, or None if nothing to do."""
@@ -2048,6 +2385,7 @@ PRIVACY & SAFETY
             return
         self.dest_entry.delete(0, "end")
         self.dest_entry.insert(0, path)
+        self._persist_settings()
         warn = destination_conflicts_with_sources(path, self.source_paths)
         if warn:
             messagebox.showwarning(APP_TITLE, warn)
@@ -2096,6 +2434,10 @@ PRIVACY & SAFETY
         self._organise_preview_key = self._organise_plan_key(dest, layout_ids, options)
         self._last_organise_plan = plan
         self._set_status(f"Organise preview ({label}): {len(plan.items)} actions planned.")
+        self.workflow_banner.configure(
+            text="Next: review the plan (Browse dry-run…), then untick Dry run and click Apply."
+        )
+        self._persist_settings()
 
     def _organise_plan_key(self, dest: str, layout_ids, options: OrganiseOptions) -> str:
         cats = ",".join(sorted(options.categories or []))
@@ -2223,10 +2565,10 @@ PRIVACY & SAFETY
         self._last_organise_plan = plan
         self._set_busy(True)
         mode_label = "Dry run" if dry else ("Copy" if options.copy_instead_of_move else "Move")
-        self._set_status(f"{mode_label} starting ({preset.name})…")
+        self._set_status(f"{mode_label} starting ({label})…")
         threading.Thread(
             target=self._organise_worker,
-            args=(plan, dry, options, dest, preset.name),
+            args=(plan, dry, options, dest, label),
             daemon=True,
         ).start()
 
@@ -2242,7 +2584,7 @@ PRIVACY & SAFETY
         log = apply_organise_plan(
             plan,
             dry_run=dry,
-            status_cb=lambda msg: self.after(0, self._set_status, msg),
+            status_cb=self._worker_status,
             should_cancel=self._should_cancel,
             options=options,
             dest_root=dest,
@@ -2278,6 +2620,7 @@ PRIVACY & SAFETY
         ]
         self._write_box(self.org_box, "\n".join(header + log[:500]))
         self._set_status(f"{mode} finished ({layout_name}): {count} items in {took}.")
+        self._refresh_workflow()
         if not dry:
             tip = (
                 "Done. Spot-check a few files in the destination, "

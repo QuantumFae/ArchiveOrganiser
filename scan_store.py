@@ -42,11 +42,16 @@ CREATE TABLE IF NOT EXISTS hash_cache (
     hash_value TEXT NOT NULL,
     PRIMARY KEY (path, size, modified)
 );
+
+CREATE TABLE IF NOT EXISTS scan_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
 class ScanStore:
-    """Temporary SQLite database for one scan session."""
+    """SQLite database for one scan session (temp or on-disk for reload)."""
 
     def __init__(self, path: Optional[Path] = None) -> None:
         if path is None:
@@ -57,6 +62,8 @@ class ScanStore:
             path = Path(name)
             self._temp = True
         else:
+            path = Path(path)
+            path.parent.mkdir(parents=True, exist_ok=True)
             self._temp = False
         self.path = path
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
@@ -82,6 +89,31 @@ class ScanStore:
                 shm.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    def clear_files(self) -> None:
+        """Remove file rows for a fresh scan; keep hash_cache for speed."""
+        self._insert_batch.clear()
+        self.conn.execute("DELETE FROM files")
+        self.conn.commit()
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO scan_meta (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        self.conn.commit()
+
+    def get_meta(self, key: str, default: str = "") -> str:
+        row = self.conn.execute(
+            "SELECT value FROM scan_meta WHERE key = ?", (key,)
+        ).fetchone()
+        return str(row["value"]) if row else default
+
+    def meta_dict(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for row in self.conn.execute("SELECT key, value FROM scan_meta"):
+            out[str(row["key"])] = str(row["value"])
+        return out
 
     def flush(self) -> None:
         if not self._insert_batch:
