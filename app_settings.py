@@ -63,6 +63,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "add_readme_notes": True,
     "archive_older_than_days": 365,
     "custom_structure_text": "",
+    "use_ollama_suggest": False,
     "last_quarantine_session": "",
     "last_scan_db": "",
 }

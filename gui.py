@@ -44,6 +44,11 @@ from ctk_theme import (
     paned_bg,
     primary_button,
 )
+from organise_suggest import (
+    OrganiseSuggestion,
+    format_suggestion_summary,
+    suggest_organise_options_auto,
+)
 from organiser import (
     ALL_CATEGORIES,
     CATEGORY_MODE_LABELS,
@@ -105,9 +110,11 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._cancel_flag = False
         self._busy = False
         self._selected_group_index: Optional[int] = None
-        self._compare_check_vars: list[tk.BooleanVar] = []
+        # IntVar (0/1) matches CTkCheckBox onvalue/offvalue more reliably than BooleanVar
+        self._compare_check_vars: list[tk.IntVar] = []
         self._compare_checkboxes: list = []
         self._compare_file_infos: list[FileInfo] = []
+        self._compare_is_keep: list[bool] = []
         self._compare_image_refs: list[object] = []  # keep CTkImage alive
         self._compare_pil_images: list[object] = []
         self._compare_img_labels: list[ctk.CTkLabel] = []
@@ -424,27 +431,27 @@ class ArchiveOrganiserApp(ctk.CTk):
         select_row.grid(row=2, column=0, sticky="ew", padx=6, pady=(0, 2))
         ctk.CTkButton(
             select_row,
-            text="Select extras only",
+            text="Select extras only (this group)",
             command=self.select_extras_in_group,
-            width=130,
-            height=28,
+            width=210,
+            height=30,
         ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
-            select_row, text="Select all", command=self.select_all_in_group, width=90, height=28
+            select_row, text="Select all", command=self.select_all_in_group, width=90, height=30
         ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
             select_row,
             text="Clear selection",
             command=self.clear_compare_selection,
-            width=110,
-            height=28,
+            width=120,
+            height=30,
         ).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(
+        primary_button(
             select_row,
             text="Mark all extras (every group)",
             command=self.mark_all_extras,
-            width=190,
-            height=28,
+            width=210,
+            height=30,
         ).pack(side="left", padx=(0, 6))
         self.dup_marked_label = ctk.CTkLabel(
             select_row,
@@ -519,6 +526,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._compare_check_vars.clear()
         self._compare_checkboxes.clear()
         self._compare_file_infos.clear()
+        self._compare_is_keep.clear()
         self._compare_image_refs.clear()
         self._compare_pil_images.clear()
         self._compare_img_labels.clear()
@@ -780,9 +788,12 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._compare_cards_paned = h_top
 
         for col, info in enumerate(group.files):
-            role = "KEEP (oldest)" if col == 0 else f"Copy #{col + 1}"
-            preview_col = self._build_preview_column(h_top, info, role, total_cards=count)
-            info_col = self._build_info_column(h_bottom, info, role)
+            role = self._duplicate_role_label(col)
+            is_keep = col == 0
+            preview_col = self._build_preview_column(
+                h_top, info, role, is_keep=is_keep, total_cards=count
+            )
+            info_col = self._build_info_column(h_bottom, info, role, is_keep=is_keep)
             h_top.add(preview_col, minsize=160)
             h_bottom.add(info_col, minsize=160)
 
@@ -803,9 +814,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         except Exception:
             pass
 
-        marked_here = sum(
-            1 for var in self._compare_check_vars if var.get()
-        )
+        marked_here = sum(1 for var in self._compare_check_vars if int(var.get()))
         self._set_status(
             f"Viewing: {group.english_heading().splitlines()[0]} · "
             f"group {index + 1}/{len(self.dup_report.groups)} · "
@@ -813,6 +822,15 @@ class ArchiveOrganiserApp(ctk.CTk):
             "← → Prev/Next"
         )
         self._refresh_marked_label()
+
+    @staticmethod
+    def _duplicate_role_label(index: int) -> str:
+        """Plain-English role for a file in a duplicate group (oldest is Keep)."""
+        if index == 0:
+            return "Keep (oldest)"
+        if index == 1:
+            return "Extra copy"
+        return f"Extra copy {index}"
 
     def prev_duplicate_group(self) -> None:
         if not self.dup_report or not self.dup_report.groups:
@@ -865,16 +883,54 @@ class ArchiveOrganiserApp(ctk.CTk):
         return "break"
 
     def _build_preview_column(
-        self, parent, info: FileInfo, role: str, total_cards: int = 2
+        self,
+        parent,
+        info: FileInfo,
+        role: str,
+        is_keep: bool = False,
+        total_cards: int = 2,
     ) -> ctk.CTkFrame:
-        """Top-row cell: role title + Preview content (always something visual)."""
+        """Top-row cell: mark checkbox (always visible) + role + preview."""
         col = ctk.CTkFrame(parent)
         col.grid_columnconfigure(0, weight=1)
-        col.grid_rowconfigure(2, weight=1)
+        col.grid_rowconfigure(3, weight=1)
 
-        ctk.CTkLabel(col, text=role, font=ctk.CTkFont(size=13, weight="bold")).grid(
-            row=0, column=0, sticky="w", padx=8, pady=(8, 2)
+        role_color = PRIMARY if is_keep else WARNING
+        ctk.CTkLabel(
+            col,
+            text=role,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=role_color,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 2))
+
+        # Mark checkbox lives in the TOP pane so Select extras is always visible
+        mark_row = ctk.CTkFrame(col, fg_color="transparent")
+        mark_row.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 4))
+        check_var = tk.IntVar(value=0)
+        select_text = "Mark for quarantine/delete"
+        if info.is_inside_archive:
+            select_text = "Inside zip (can't quarantine alone)"
+        elif is_keep:
+            select_text = "Keep (not an extra)"
+        checkbox = ctk.CTkCheckBox(
+            mark_row,
+            text=select_text,
+            variable=check_var,
+            checkbox_width=22,
+            checkbox_height=22,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=lambda i=info, v=check_var: self._on_mark_toggle(i, v),
         )
+        checkbox.pack(side="left", fill="x", expand=True)
+        if info.is_inside_archive:
+            checkbox.configure(state="disabled")
+            check_var.set(0)
+        self._compare_check_vars.append(check_var)
+        self._compare_checkboxes.append(checkbox)
+        self._compare_file_infos.append(info)
+        self._compare_is_keep.append(is_keep)
+
         preview = load_preview_for_info(info, role)
         kind_label = {
             "image": "Preview",
@@ -886,10 +942,10 @@ class ArchiveOrganiserApp(ctk.CTk):
             text=kind_label,
             font=ctk.CTkFont(size=11),
             text_color=MUTED,
-        ).grid(row=1, column=0, sticky="w", padx=8, pady=(0, 2))
+        ).grid(row=2, column=0, sticky="w", padx=8, pady=(0, 2))
 
         preview_host = ctk.CTkFrame(col, fg_color=("gray90", "gray20"))
-        preview_host.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 6))
+        preview_host.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 6))
         preview_host.grid_columnconfigure(0, weight=1)
         preview_host.grid_rowconfigure(0, weight=1)
 
@@ -946,13 +1002,15 @@ class ArchiveOrganiserApp(ctk.CTk):
 
         return col
 
-    def _build_info_column(self, parent, info: FileInfo, role: str) -> ctk.CTkFrame:
-        """Bottom-row cell: File info + actions."""
+    def _build_info_column(
+        self, parent, info: FileInfo, role: str, is_keep: bool = False
+    ) -> ctk.CTkFrame:
+        """Bottom-row cell: bold category headings + full metadata + open folder."""
         col = ctk.CTkFrame(parent)
         col.grid_columnconfigure(0, weight=1)
         col.grid_rowconfigure(2, weight=1)
 
-        role_color = PRIMARY if role.startswith("KEEP") else WARNING
+        role_color = PRIMARY if is_keep else WARNING
         ctk.CTkLabel(
             col,
             text=role,
@@ -968,43 +1026,64 @@ class ArchiveOrganiserApp(ctk.CTk):
         ).grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 2))
 
         preview = load_preview_for_info(info, role)
-        info_box = ctk.CTkTextbox(col, font=ctk.CTkFont(family="monospace", size=11))
-        info_box.grid(row=2, column=0, padx=8, pady=(0, 4), sticky="nsew")
-        info_box.insert("1.0", preview.info_text)
-        info_box.configure(state="disabled")
+        meta = ctk.CTkScrollableFrame(col)
+        meta.grid(row=2, column=0, padx=6, pady=(0, 4), sticky="nsew")
+        meta.grid_columnconfigure(0, weight=1)
+        self._fill_file_metadata_panel(meta, preview.info_text)
 
         actions = ctk.CTkFrame(col, fg_color="transparent")
         actions.grid(row=3, column=0, sticky="ew", padx=8, pady=(2, 8))
-
-        is_keep = role.startswith("KEEP")
-        check_var = tk.BooleanVar(value=False)
-        select_text = "Mark for quarantine/delete"
-        if info.is_inside_archive:
-            select_text = "Inside zip (can't quarantine alone)"
-        checkbox = ctk.CTkCheckBox(
-            actions,
-            text=select_text,
-            variable=check_var,
-            command=lambda i=info, v=check_var: self._on_mark_toggle(i, v),
-        )
-        checkbox.pack(side="left")
-        if info.is_inside_archive:
-            checkbox.configure(state="disabled")
-            check_var.set(False)
         open_target = info.archive_container if info.is_inside_archive else info.path
         ctk.CTkButton(
             actions,
             text="Open folder",
-            width=100,
-            height=26,
+            width=110,
+            height=28,
             command=lambda p=open_target: self._open_folder(p),
         ).pack(side="right")
-
-        self._compare_check_vars.append(check_var)
-        self._compare_checkboxes.append(checkbox)
-        self._compare_file_infos.append(info)
-        # Apply mark / auto-extra after all columns exist (done in show_duplicate_group)
         return col
+
+    def _fill_file_metadata_panel(self, parent, info_text: str) -> None:
+        """Render metadata with bold section headings (ROLE, FILE, …)."""
+        current_title = ""
+        body_lines: list[str] = []
+
+        def flush() -> None:
+            nonlocal current_title, body_lines
+            if not current_title and not body_lines:
+                return
+            if current_title:
+                ctk.CTkLabel(
+                    parent,
+                    text=current_title,
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                    text_color=PRIMARY,
+                    anchor="w",
+                ).pack(anchor="w", padx=4, pady=(8, 0))
+            text = "\n".join(body_lines).strip("\n")
+            if text:
+                ctk.CTkLabel(
+                    parent,
+                    text=text,
+                    font=ctk.CTkFont(size=11),
+                    anchor="w",
+                    justify="left",
+                    wraplength=420,
+                ).pack(anchor="w", padx=10, pady=(0, 2))
+            current_title = ""
+            body_lines = []
+
+        for raw in (info_text or "").splitlines():
+            line = raw.rstrip()
+            stripped = line.strip()
+            # Section headings from preview.build_info_text are ALL CAPS words
+            compact = stripped.replace(" ", "").replace("&", "")
+            if stripped and stripped == stripped.upper() and compact.isalpha():
+                flush()
+                current_title = stripped
+                continue
+            body_lines.append(line if line.startswith("  ") else f"  {line}" if line else "")
+        flush()
 
     def _path_key(self, info: FileInfo) -> str:
         try:
@@ -1016,39 +1095,96 @@ class ArchiveOrganiserApp(ctk.CTk):
         if hasattr(self, "dup_marked_label"):
             self.dup_marked_label.configure(text=f"Marked: {len(self._dup_marked_paths)}")
 
-    def _on_mark_toggle(self, info: FileInfo, var: tk.BooleanVar) -> None:
+    def _refresh_group_mark_indicators(self) -> None:
+        """Update ✓ badges on group list buttons after mark changes."""
+        if not self.dup_report or not self._group_buttons:
+            return
+        for i, btn in enumerate(self._group_buttons):
+            if i >= len(self.dup_report.groups):
+                break
+            group = self.dup_report.groups[i]
+            label = group.english_heading()
+            marked_in_group = sum(
+                1
+                for f in group.files[1:]
+                if not f.is_inside_archive and self._path_key(f) in self._dup_marked_paths
+            )
+            if marked_in_group:
+                label = f"✓ {label}"
+            try:
+                btn.configure(text=label)
+            except Exception:
+                pass
+        if self._selected_group_index is not None:
+            self._highlight_group_button(self._selected_group_index)
+
+    def _on_mark_toggle(self, info: FileInfo, var: tk.Variable) -> None:
         if info.is_inside_archive:
             return
         key = self._path_key(info)
-        if var.get():
+        if int(var.get()):
             self._dup_marked_paths.add(key)
         else:
             self._dup_marked_paths.discard(key)
         self._refresh_marked_label()
+        self._refresh_group_mark_indicators()
 
-    def _set_checkbox(self, checkbox, var: tk.BooleanVar, want: bool) -> None:
-        """Force CTkCheckBox UI to match want (BooleanVar alone is unreliable)."""
-        var.set(want)
-        try:
-            if want:
-                checkbox.select()
-            else:
-                checkbox.deselect()
-        except Exception:
-            pass
-        # Second pass after idle — some CTk builds need it
-        self.after(
-            10,
+    def _set_checkbox(self, checkbox, var: tk.Variable, want: bool) -> None:
+        """Force CTkCheckBox visual + IntVar to match want (CTk can lag on var-only)."""
+        # Cancel a previous delayed force on this widget so rapid clicks don't fight
+        old_job = getattr(checkbox, "_ao_force_job", None)
+        if old_job is not None:
+            try:
+                self.after_cancel(old_job)
+            except Exception:
+                pass
+            checkbox._ao_force_job = None
+
+        self._apply_checkbox_state(checkbox, var, want)
+        checkbox._ao_force_job = self.after(
+            20,
             lambda c=checkbox, v=var, w=want: self._force_checkbox_visual(c, v, w),
         )
 
-    def _force_checkbox_visual(self, checkbox, var: tk.BooleanVar, want: bool) -> None:
+    def _apply_checkbox_state(self, checkbox, var: tk.Variable, want: bool) -> None:
+        want_i = 1 if want else 0
         try:
-            var.set(want)
-            if want:
-                checkbox.select()
-            else:
-                checkbox.deselect()
+            checkbox._variable_callback_blocked = True
+        except Exception:
+            pass
+        try:
+            var.set(want_i)
+            # Drive CTk's internal draw path directly — most reliable on Linux
+            checkbox._check_state = bool(want)
+            if getattr(checkbox, "_variable", None) is not None:
+                on_v = getattr(checkbox, "_onvalue", 1)
+                off_v = getattr(checkbox, "_offvalue", 0)
+                checkbox._variable.set(on_v if want else off_v)
+            checkbox._draw()
+        except Exception:
+            try:
+                var.set(want_i)
+                if want:
+                    checkbox.select()
+                else:
+                    checkbox.deselect()
+            except Exception:
+                pass
+        finally:
+            try:
+                checkbox._variable_callback_blocked = False
+            except Exception:
+                pass
+
+    def _force_checkbox_visual(self, checkbox, var: tk.Variable, want: bool) -> None:
+        try:
+            if not checkbox.winfo_exists():
+                return
+        except Exception:
+            return
+        self._apply_checkbox_state(checkbox, var, want)
+        try:
+            checkbox._ao_force_job = None
         except Exception:
             pass
 
@@ -1065,13 +1201,14 @@ class ArchiveOrganiserApp(ctk.CTk):
         for i, (var, info, checkbox) in enumerate(
             zip(self._compare_check_vars, self._compare_file_infos, self._compare_checkboxes)
         ):
+            is_keep = self._compare_is_keep[i] if i < len(self._compare_is_keep) else i == 0
             if info.is_inside_archive:
                 self._set_checkbox(checkbox, var, False)
                 continue
             key = self._path_key(info)
             if key in self._dup_marked_paths:
                 want = True
-            elif not any_marked and i > 0:
+            elif not any_marked and not is_keep:
                 # First visit pattern: auto-select extras
                 want = True
                 self._dup_marked_paths.add(key)
@@ -1081,9 +1218,15 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._refresh_marked_label()
 
     def select_extras_in_group(self) -> None:
-        """Select every extra copy (not KEEP); skip zip members. Marks persist."""
-        if not self._compare_check_vars:
+        """Select every extra copy (not Keep); skip zip members. Marks persist."""
+        if not self._compare_check_vars or not self._compare_file_infos:
             self._set_status("Open a duplicate group first, then use Select extras only.")
+            messagebox.showinfo(
+                APP_TITLE,
+                "Open a duplicate group on the left first.\n\n"
+                "Then click Select extras only (this group).\n"
+                "Or use Mark all extras (every group) to mark everything at once.",
+            )
             return
         selected = 0
         for i, (var, info, checkbox) in enumerate(
@@ -1093,7 +1236,8 @@ class ArchiveOrganiserApp(ctk.CTk):
                 self._compare_checkboxes,
             )
         ):
-            want = i > 0 and not info.is_inside_archive
+            is_keep = self._compare_is_keep[i] if i < len(self._compare_is_keep) else i == 0
+            want = (not is_keep) and (not info.is_inside_archive)
             self._set_checkbox(checkbox, var, want)
             key = self._path_key(info)
             if want:
@@ -1101,11 +1245,44 @@ class ArchiveOrganiserApp(ctk.CTk):
                 selected += 1
             else:
                 self._dup_marked_paths.discard(key)
+        # Immediate second pass (no waiting for after()) so the tick is visible now
+        for i, (var, info, checkbox) in enumerate(
+            zip(
+                self._compare_check_vars,
+                self._compare_file_infos,
+                self._compare_checkboxes,
+            )
+        ):
+            is_keep = self._compare_is_keep[i] if i < len(self._compare_is_keep) else i == 0
+            want = (not is_keep) and (not info.is_inside_archive)
+            self._apply_checkbox_state(checkbox, var, want)
         self._refresh_marked_label()
-        self._set_status(
-            f"Selected {selected} extra file(s) in this group "
-            f"(total marked: {len(self._dup_marked_paths)})."
-        )
+        self._refresh_group_mark_indicators()
+        # Verify end-to-end: checkbox visual + var + mark set agree
+        mismatches = []
+        for i, (var, info, checkbox) in enumerate(
+            zip(
+                self._compare_check_vars,
+                self._compare_file_infos,
+                self._compare_checkboxes,
+            )
+        ):
+            is_keep = self._compare_is_keep[i] if i < len(self._compare_is_keep) else i == 0
+            want = (not is_keep) and (not info.is_inside_archive)
+            key = self._path_key(info)
+            visual = bool(getattr(checkbox, "_check_state", int(var.get())))
+            marked = key in self._dup_marked_paths
+            if visual != want or bool(int(var.get())) != want or marked != want:
+                mismatches.append(info.name)
+        if mismatches:
+            self._set_status(
+                f"Select extras had trouble updating: {', '.join(mismatches[:3])}"
+            )
+        else:
+            self._set_status(
+                f"Selected {selected} extra file(s) in this group "
+                f"(Keep left unchecked · total marked: {len(self._dup_marked_paths)})."
+            )
 
     def select_all_in_group(self) -> None:
         if not self._compare_check_vars:
@@ -1123,6 +1300,7 @@ class ArchiveOrganiserApp(ctk.CTk):
             self._set_checkbox(checkbox, var, True)
             self._dup_marked_paths.add(self._path_key(info))
         self._refresh_marked_label()
+        self._refresh_group_mark_indicators()
         self._set_status("Selected all removable files in this group.")
 
     def clear_compare_selection(self) -> None:
@@ -1134,10 +1312,11 @@ class ArchiveOrganiserApp(ctk.CTk):
             self._set_checkbox(checkbox, var, False)
             self._dup_marked_paths.discard(self._path_key(info))
         self._refresh_marked_label()
+        self._refresh_group_mark_indicators()
         self._set_status("Cleared selection in this group.")
 
     def mark_all_extras(self) -> None:
-        """Mark every extra (non-KEEP) on-disk file across all duplicate groups."""
+        """Mark every extra (non-Keep) on-disk file across all duplicate groups."""
         if not self.dup_report or not self.dup_report.groups:
             messagebox.showinfo(APP_TITLE, "Run Find duplicates first.")
             return
@@ -1172,11 +1351,10 @@ class ArchiveOrganiserApp(ctk.CTk):
             if info.is_inside_archive:
                 continue
             key = self._path_key(info)
-            if var.get() or key in self._dup_marked_paths:
+            if int(var.get()) or key in self._dup_marked_paths:
                 if key not in seen:
                     chosen.append(info)
                     seen.add(key)
-        # If nothing in open group but marks exist elsewhere, offer those via quarantine_marked
         return chosen
 
     def _all_marked_files(self) -> list[FileInfo]:
@@ -1454,6 +1632,13 @@ class ArchiveOrganiserApp(ctk.CTk):
         layout_tools.grid(row=1, column=0, sticky="ew", padx=6, pady=(0, 4))
         ctk.CTkButton(
             layout_tools,
+            text="Suggest layout for me",
+            width=160,
+            height=30,
+            command=self._suggest_organise_layout,
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            layout_tools,
             text="Use recommended",
             width=140,
             height=30,
@@ -1616,9 +1801,32 @@ class ArchiveOrganiserApp(ctk.CTk):
 
         ctk.CTkLabel(
             opts,
-            text="Archive best practices",
+            text="Local AI (optional)",
             font=ctk.CTkFont(size=13, weight="bold"),
         ).grid(row=9, column=0, sticky="w", padx=6, pady=(10, 2))
+        ctk.CTkLabel(
+            opts,
+            text="Uses Ollama on this computer only. Off by default — Suggest still works with rules.",
+            font=ctk.CTkFont(size=11),
+            text_color=MUTED,
+            justify="left",
+            anchor="w",
+        ).grid(row=10, column=0, sticky="ew", padx=8, pady=(0, 4))
+        self.use_ollama_var = tk.BooleanVar(
+            value=bool(self._settings.get("use_ollama_suggest", False))
+        )
+        ctk.CTkCheckBox(
+            opts,
+            text="Use local AI (Ollama)",
+            variable=self.use_ollama_var,
+            command=self._persist_settings,
+        ).grid(row=11, column=0, sticky="w", padx=8, pady=(2, 8))
+
+        ctk.CTkLabel(
+            opts,
+            text="Archive best practices",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).grid(row=12, column=0, sticky="w", padx=6, pady=(10, 2))
         self.date_prefix_var = tk.BooleanVar(
             value=bool(self._settings.get("rename_with_date_prefix", False))
         )
@@ -1636,27 +1844,27 @@ class ArchiveOrganiserApp(ctk.CTk):
             text="(Copy vs move stays on the Layouts tab for safety)",
             font=ctk.CTkFont(size=11),
             text_color=MUTED,
-        ).grid(row=10, column=0, sticky="w", padx=8, pady=2)
+        ).grid(row=13, column=0, sticky="w", padx=8, pady=2)
         ctk.CTkCheckBox(
             opts,
             text="Add YYYY-MM-DD date prefix to filenames",
             variable=self.date_prefix_var,
             command=self._update_layout_visual,
-        ).grid(row=11, column=0, sticky="w", padx=8, pady=4)
+        ).grid(row=14, column=0, sticky="w", padx=8, pady=4)
         ctk.CTkCheckBox(
             opts,
             text="Sanitize filenames (safer characters)",
             variable=self.sanitize_names_var,
             command=self._update_layout_visual,
-        ).grid(row=12, column=0, sticky="w", padx=8, pady=4)
+        ).grid(row=15, column=0, sticky="w", padx=8, pady=4)
         ctk.CTkCheckBox(
             opts,
             text="Write README.txt notes in top folders",
             variable=self.readme_notes_var,
             command=self._update_layout_visual,
-        ).grid(row=13, column=0, sticky="w", padx=8, pady=4)
+        ).grid(row=16, column=0, sticky="w", padx=8, pady=4)
         age_row = ctk.CTkFrame(opts, fg_color="transparent")
-        age_row.grid(row=14, column=0, sticky="ew", padx=8, pady=(2, 8))
+        age_row.grid(row=17, column=0, sticky="ew", padx=8, pady=(2, 8))
         ctk.CTkLabel(age_row, text="Archive files older than (days):", font=ctk.CTkFont(size=12, weight="bold")).pack(
             side="left"
         )
@@ -1668,17 +1876,17 @@ class ArchiveOrganiserApp(ctk.CTk):
             opts,
             text="Custom structure (when layout = Custom)",
             font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=15, column=0, sticky="w", padx=6, pady=(10, 2))
+        ).grid(row=18, column=0, sticky="w", padx=6, pady=(10, 2))
         ctk.CTkLabel(
             opts,
             text="Tree lines + rules like: Photos = MyArchive/Photos/{year}/{month}",
             font=ctk.CTkFont(size=11),
             text_color=("gray40", "gray70"),
-        ).grid(row=16, column=0, sticky="w", padx=8)
+        ).grid(row=19, column=0, sticky="w", padx=8)
         self.custom_structure_box = ctk.CTkTextbox(
             opts, height=130, font=ctk.CTkFont(family="monospace", size=11)
         )
-        self.custom_structure_box.grid(row=17, column=0, sticky="ew", padx=8, pady=(2, 10))
+        self.custom_structure_box.grid(row=20, column=0, sticky="ew", padx=8, pady=(2, 10))
         saved_custom = str(self._settings.get("custom_structure_text") or "").strip()
         self.custom_structure_box.insert(
             "1.0", saved_custom if saved_custom else DEFAULT_CUSTOM_TEMPLATE
@@ -1856,6 +2064,168 @@ class ArchiveOrganiserApp(ctk.CTk):
             var.set(lid == keep)
         self._on_layout_chosen()
 
+    def _suggest_organise_layout(self) -> None:
+        """Propose layout + folder knobs (rules, or optional local Ollama)."""
+        if not self._has_scan_files():
+            messagebox.showinfo(
+                APP_TITLE,
+                "Scan a folder first so suggestions can look at your file types and paths.",
+            )
+            return
+        if getattr(self, "_suggest_busy", False):
+            return
+        files = self._scan_files()
+        settings = self._collect_settings()
+        use_ollama = bool(
+            getattr(self, "use_ollama_var", None) and self.use_ollama_var.get()
+        )
+        self._suggest_busy = True
+        if use_ollama:
+            self._set_status("Asking local AI (Ollama)… — stays on this computer.")
+        else:
+            self._set_status("Building offline suggestion…")
+        threading.Thread(
+            target=self._suggest_organise_worker,
+            args=(files, settings, use_ollama),
+            daemon=True,
+        ).start()
+
+    def _suggest_organise_worker(
+        self,
+        files: list,
+        settings: dict,
+        use_ollama: bool,
+    ) -> None:
+        suggestion = suggest_organise_options_auto(
+            files,
+            saved_settings=settings,
+            use_ollama=use_ollama,
+        )
+        self.after(0, self._suggest_organise_done, suggestion)
+
+    def _suggest_organise_done(self, suggestion: OrganiseSuggestion) -> None:
+        self._suggest_busy = False
+        if suggestion.source == "ollama":
+            self._set_status("Local AI suggestion ready — review, then Apply if you like it.")
+        elif suggestion.source == "rules_fallback":
+            self._set_status("Local AI unavailable — showing offline rules suggestion.")
+        else:
+            self._set_status("Offline suggestion ready — review, then Apply if you like it.")
+        self._show_organise_suggestion_dialog(suggestion)
+
+    def _show_organise_suggestion_dialog(self, suggestion: OrganiseSuggestion) -> None:
+        """Show a summary dialog; Apply fills existing Organise widgets only."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Suggest layout for me")
+        dialog.geometry("560x480")
+        dialog.minsize(420, 360)
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.grid_columnconfigure(0, weight=1)
+        dialog.grid_rowconfigure(1, weight=1)
+
+        if suggestion.source == "ollama":
+            title = "Local AI suggestion (Ollama)"
+        elif suggestion.source == "rules_fallback":
+            title = "Offline suggestion (AI fallback)"
+        else:
+            title = "Offline suggestion (rules only)"
+
+        ctk.CTkLabel(
+            dialog,
+            text=title,
+            font=ctk.CTkFont(size=15, weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 4))
+
+        body = ctk.CTkTextbox(dialog, font=ctk.CTkFont(size=12))
+        body.grid(row=1, column=0, sticky="nsew", padx=14, pady=4)
+        lines = suggestion.summary_lines or format_suggestion_summary(suggestion)
+        body.insert("1.0", "\n".join(lines))
+        body.configure(state="disabled")
+
+        buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons.grid(row=2, column=0, sticky="ew", padx=14, pady=(8, 14))
+
+        def _close() -> None:
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            dialog.destroy()
+
+        def _apply() -> None:
+            self._apply_organise_suggestion(suggestion)
+            _close()
+
+        ctk.CTkButton(buttons, text="Cancel", width=110, height=34, command=_close).pack(
+            side="right", padx=(8, 0)
+        )
+        primary_button(
+            buttons,
+            text="Apply suggestion",
+            width=160,
+            height=34,
+            command=_apply,
+        ).pack(side="right")
+
+        dialog.protocol("WM_DELETE_WINDOW", _close)
+        dialog.focus_set()
+
+    def _apply_organise_suggestion(self, suggestion: OrganiseSuggestion) -> None:
+        """Fill Organise widgets from a suggestion; user still Preview → Apply."""
+        want = set(suggestion.layout_ids)
+        if not want:
+            want = {"type_date"}
+        # Rebuild list order so suggested layouts appear first
+        ranked = list(suggestion.layout_ids) + [
+            lid for lid in (self._layout_recommended_ids or []) if lid not in want
+        ]
+        self._saved_layout_ids = list(suggestion.layout_ids)
+        self.layout_vars = {}
+        self._rebuild_layout_options(recommended=ranked or ["type_date"])
+        for lid, var in self.layout_vars.items():
+            var.set(lid in want)
+        if not any(var.get() for var in self.layout_vars.values()):
+            fallback = next(iter(want), "type_date")
+            if fallback in self.layout_vars:
+                self.layout_vars[fallback].set(True)
+
+        depth = suggestion.media_date_depth
+        if hasattr(self, "media_date_depth_var"):
+            label = self._media_depth_value_to_label.get(
+                depth, MEDIA_DATE_DEPTH_LABELS.get(depth, MEDIA_DATE_DEPTH_LABELS["year_month"])
+            )
+            self.media_date_depth_var.set(label)
+
+        if hasattr(self, "documents_by_ext_var"):
+            self.documents_by_ext_var.set(bool(suggestion.documents_by_ext))
+
+        modes = suggestion.category_subfolders or {}
+        for cat, var in getattr(self, "category_mode_vars", {}).items():
+            mode = modes.get(cat, "layout_default")
+            label = self._category_mode_value_to_label.get(
+                mode, CATEGORY_MODE_LABELS["layout_default"]
+            )
+            var.set(label)
+
+        self._organise_preview_ready = False
+        self._organise_preview_key = None
+        self._on_layout_chosen()
+        self._persist_settings()
+        self._sync_organise_apply_button()
+        self._open_organise_advanced_tab()
+        self._set_status(
+            "Suggestion applied to Organise controls — Preview plan when ready "
+            "(nothing copied or moved yet)."
+        )
+        messagebox.showinfo(
+            APP_TITLE,
+            "Suggestion applied to the Organise controls.\n\n"
+            "Next: check the visual preview, then click Preview plan.\n"
+            "Apply organise still waits for you — nothing was moved.",
+        )
+
     def _clear_layouts_to_one(self) -> None:
         """Keep the first selected layout only (or recommended if none)."""
         selected = [lid for lid, var in self.layout_vars.items() if var.get()]
@@ -2025,7 +2395,8 @@ class ArchiveOrganiserApp(ctk.CTk):
 3. Duplicates tab
    • Groups are listed in plain English and grouped by file type (Photos, Documents, …).
    • Extras are auto-marked; marks stay as you browse with ← → / Prev / Next.
-   • Select extras only / Mark all extras / Clear selection for fine control.
+   • Select extras only (this group) ticks extras and unticks Keep — checkboxes are in the top preview row.
+   • Mark all extras (every group) / Clear selection for fine control.
    • File info shows ROLE, FILE, SIZE & DATE, LOCATION, and fingerprint sections.
    • Prefer Quarantine selected/marked. Confirmations show count + size + “oldest kept”.
    • Open last quarantine jumps to the newest quarantine session folder.
@@ -2033,6 +2404,8 @@ class ArchiveOrganiserApp(ctk.CTk):
 4. Organise tab
    • Destination panel: Browse / add folder… (same friendly picker as Sources).
    • Left pane has two tabs: Layouts (choose structure) and Advanced (full-height options).
+   • Suggest layout for me: offline rules (or optional local Ollama) fill layouts + folder options.
+   • Advanced → Use local AI (Ollama) is optional and off by default; falls back to rules if needed.
    • Life-area folders use plain names (Personal, Media, Finance) — not 01_Personal.
    • Keep Copy + Dry run on at first. Preview plan, then Run dry run / Apply organise.
    • Custom structure cannot mix with other layouts (Custom alone).
@@ -2246,6 +2619,9 @@ PRIVACY & SAFETY
             else True,
             "archive_older_than_days": archive_days,
             "custom_structure_text": custom_text,
+            "use_ollama_suggest": bool(self.use_ollama_var.get())
+            if hasattr(self, "use_ollama_var")
+            else False,
             "last_quarantine_session": self._last_quarantine_session or "",
             "last_scan_db": str(last_scan_db_path()),
         }
@@ -2450,7 +2826,7 @@ PRIVACY & SAFETY
             row.pack(fill="x", padx=4, pady=2)
             var = tk.BooleanVar(value=False)
             self._source_check_vars[path] = var
-            ctk.CTkCheckBox(row, text=path, variable=var, anchor="w").pack(
+            ctk.CTkCheckBox(row, text=path, variable=var).pack(
                 side="left", fill="x", expand=True
             )
             ctk.CTkButton(
