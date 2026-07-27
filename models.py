@@ -61,6 +61,8 @@ class FileInfo:
     # Similarity helpers filled during duplicate search
     visual_hash: Optional[str] = None
     content_fingerprint: Optional[str] = None
+    # Row id when loaded from ScanStore (SQLite)
+    store_id: Optional[int] = None
 
     @property
     def name(self) -> str:
@@ -85,7 +87,12 @@ class FileInfo:
 
 @dataclass
 class ScanResult:
-    """Everything found after scanning one or more folders."""
+    """Everything found after scanning one or more folders.
+
+    Large scans write into ``store`` (SQLite) and leave ``files`` empty until
+    ``ensure_files_loaded()`` is called (organise / inventory). Exact duplicate
+    search can query the store by size without loading every FileInfo.
+    """
 
     files: list[FileInfo] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -96,3 +103,19 @@ class ScanResult:
     total_bytes: int = 0
     # Folders skipped because they lived on another filesystem/mount
     cross_device_skipped: int = 0
+    # Running count while scanning into SQLite (avoids loading all rows)
+    file_count: int = 0
+    # Zip members skipped due to per-zip / total caps
+    zip_members_capped: int = 0
+    # Optional SQLite index (see scan_store.ScanStore)
+    store: object = None
+
+    def ensure_files_loaded(self) -> list[FileInfo]:
+        """Load FileInfo list from the store if needed; return ``files``."""
+        if self.files:
+            return self.files
+        store = self.store
+        if store is not None:
+            self.files = store.load_all_files()  # type: ignore[attr-defined]
+            self.file_count = len(self.files)
+        return self.files

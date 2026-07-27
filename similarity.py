@@ -47,12 +47,14 @@ def names_look_similar(a: str, b: str) -> bool:
     return name_similarity(a, b) >= NAME_SIMILAR_THRESHOLD
 
 
-def _open_bytes(info: FileInfo) -> bytes:
-    """Read file bytes from disk or from inside a zip."""
+def _open_bytes(info: FileInfo, max_bytes: int = 8 * 1024 * 1024) -> bytes:
+    """Read file bytes from disk or zip, capped so multi-GB files never fill RAM."""
     if info.archive_container and info.archive_member:
         with zipfile.ZipFile(info.archive_container, "r") as zf:
-            return zf.read(info.archive_member)
-    return info.path.read_bytes()
+            with zf.open(info.archive_member, "r") as handle:
+                return handle.read(max_bytes)
+    with info.path.open("rb") as handle:
+        return handle.read(max_bytes)
 
 
 def _pil_from_info(info: FileInfo):

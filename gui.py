@@ -26,6 +26,18 @@ import os
 from models import FileInfo, ScanResult
 from best_practices import build_inventory_text, organisation_advice
 from custom_structure import DEFAULT_CUSTOM_TEMPLATE
+from ctk_theme import (
+    DANGER,
+    DANGER_HOVER,
+    LIST_BTN,
+    LIST_BTN_TEXT,
+    MUTED,
+    SELECT,
+    WARNING,
+    apply_theme,
+    paned_bg,
+    primary_button,
+)
 from organiser import (
     ALL_CATEGORIES,
     LAYOUT_PRESETS,
@@ -34,6 +46,7 @@ from organiser import (
     build_organise_plan,
     destination_conflicts_with_sources,
     get_layout,
+    layout_combo_label,
     layout_tree_text,
     recommended_layout_ids,
 )
@@ -54,8 +67,8 @@ class ArchiveOrganiserApp(ctk.CTk):
         self.geometry(APP_SIZE)
         self.minsize(900, 600)
 
+        apply_theme()
         ctk.set_appearance_mode("System")
-        ctk.set_default_color_theme("blue")
 
         self.source_paths: list[str] = []
         self.scan_result: Optional[ScanResult] = None
@@ -83,6 +96,9 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._busy_tick_job: Optional[str] = None
         self._organise_preview_key: Optional[str] = None
         self._source_check_vars: dict[str, tk.BooleanVar] = {}
+        self._group_list_shown = 0
+        self._group_page_size = 80
+        self._workflow_banner: Optional[ctk.CTkLabel] = None
 
         self._build_layout()
         self._set_status("Ready. Add folders or drives, then Scan.")
@@ -91,21 +107,46 @@ class ArchiveOrganiserApp(ctk.CTk):
 
     def _build_layout(self) -> None:
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(2, weight=1)
 
-        # Minimal top bar — almost all space goes to content
-        header = ctk.CTkFrame(self, fg_color="transparent", height=22)
-        header.grid(row=0, column=0, sticky="ew", padx=8, pady=(2, 0))
-        header.grid_columnconfigure(0, weight=1)
+        # Top bar — brand + appearance
+        header = ctk.CTkFrame(self, fg_color="transparent", height=28)
+        header.grid(row=0, column=0, sticky="ew", padx=8, pady=(4, 0))
+        header.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(
             header,
-            text=f"{APP_TITLE}  ·  Private · Local only · Safe quarantine",
-            font=ctk.CTkFont(size=12, weight="bold"),
+            text=APP_TITLE,
+            font=ctk.CTkFont(size=16, weight="bold"),
             anchor="w",
-        ).grid(row=0, column=0, sticky="ew")
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            header,
+            text="Private · Local only · Safe quarantine",
+            font=ctk.CTkFont(size=11),
+            text_color=MUTED,
+            anchor="w",
+        ).grid(row=0, column=1, sticky="w", padx=(12, 8))
+        self.appearance_var = tk.StringVar(value="System")
+        ctk.CTkOptionMenu(
+            header,
+            values=["System", "Light", "Dark"],
+            variable=self.appearance_var,
+            width=100,
+            height=26,
+            command=self._on_appearance_change,
+        ).grid(row=0, column=2, sticky="e")
+
+        self.workflow_banner = ctk.CTkLabel(
+            self,
+            text="Start on Sources: add a folder or drive, then Scan now.",
+            anchor="w",
+            font=ctk.CTkFont(size=12),
+            text_color=MUTED,
+        )
+        self.workflow_banner.grid(row=1, column=0, sticky="ew", padx=12, pady=(2, 0))
 
         self.tabs = ctk.CTkTabview(self)
-        self.tabs.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 2))
+        self.tabs.grid(row=2, column=0, sticky="nsew", padx=8, pady=(2, 2))
         self.tabs.add("Sources")
         self.tabs.add("Overview")
         self.tabs.add("Duplicates")
@@ -118,9 +159,8 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._build_organise_tab()
         self._build_help_tab()
 
-        # Compact footer
         footer = ctk.CTkFrame(self, height=40)
-        footer.grid(row=2, column=0, sticky="ew", padx=10, pady=(2, 6))
+        footer.grid(row=3, column=0, sticky="ew", padx=10, pady=(2, 6))
         footer.grid_columnconfigure(0, weight=1)
 
         self.status_label = ctk.CTkLabel(footer, text="", anchor="w", font=ctk.CTkFont(size=12))
@@ -167,7 +207,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._source_empty_label: Optional[ctk.CTkLabel] = None
 
         self.include_junk_var = tk.BooleanVar(value=False)
-        self.scan_zips_var = tk.BooleanVar(value=True)
+        self.scan_zips_var = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             opts_frame,
             text="Include junk / system folders (.Trash, System Volume Information, dot-folders, …)",
@@ -175,7 +215,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         ).pack(anchor="w", padx=8, pady=(8, 2))
         ctk.CTkCheckBox(
             opts_frame,
-            text="Scan inside .zip archives (list files stored in zips for duplicates)",
+            text="Scan inside .zip archives (slower / more RAM on huge libraries — capped)",
             variable=self.scan_zips_var,
         ).pack(anchor="w", padx=8, pady=2)
 
@@ -196,8 +236,8 @@ class ArchiveOrganiserApp(ctk.CTk):
         ctk.CTkButton(buttons, text="Clear all", command=self.clear_sources).pack(
             side="left", padx=(0, 8)
         )
-        ctk.CTkButton(
-            buttons, text="Scan now", command=self.start_scan, fg_color="#2a7a4b"
+        primary_button(
+            buttons, text="Scan now", command=self.start_scan
         ).pack(side="right")
 
         self._refresh_source_list()
@@ -249,8 +289,8 @@ class ArchiveOrganiserApp(ctk.CTk):
             dup_opts, text="Similar docs", variable=self.dup_docs_var, width=110
         ).pack(side="left", padx=2)
 
-        self.btn_find_dups = ctk.CTkButton(
-            row, text="Find duplicates", command=self.start_duplicate_search, fg_color="#2a7a4b"
+        self.btn_find_dups = primary_button(
+            row, text="Find duplicates", command=self.start_duplicate_search
         )
         self.btn_find_dups.pack(side="right")
 
@@ -261,15 +301,18 @@ class ArchiveOrganiserApp(ctk.CTk):
 
         self.dup_summary = ctk.CTkLabel(
             tab,
-            text="Run a scan, then click Find duplicates on the Overview tab.",
+            text="1) Scan on Sources  ·  2) Find duplicates on Overview  ·  3) Compare here (← → keys = Prev/Next). Extras start selected.",
             justify="left",
             anchor="w",
             font=ctk.CTkFont(size=12),
+            text_color=MUTED,
         )
         self.dup_summary.grid(row=0, column=0, sticky="ew", padx=6, pady=(4, 2))
 
         # Resizable split: drag the sash between group list and compare pane
-        paned = tk.PanedWindow(tab, orient=tk.HORIZONTAL, sashwidth=8, sashrelief=tk.RAISED)
+        paned = tk.PanedWindow(
+            tab, orient=tk.HORIZONTAL, sashwidth=8, sashrelief=tk.RAISED, bg=paned_bg()
+        )
         paned.grid(row=1, column=0, sticky="nsew", padx=6, pady=4)
         self.dup_paned = paned
 
@@ -300,12 +343,12 @@ class ArchiveOrganiserApp(ctk.CTk):
         ).grid(row=0, column=0, sticky="w")
         nav = ctk.CTkFrame(compare_header, fg_color="transparent")
         nav.grid(row=0, column=1, sticky="e")
-        ctk.CTkButton(nav, text="Prev", width=56, height=26, command=self.prev_duplicate_group).pack(
-            side="left", padx=2
-        )
-        ctk.CTkButton(nav, text="Next", width=56, height=26, command=self.next_duplicate_group).pack(
-            side="left", padx=2
-        )
+        ctk.CTkButton(
+            nav, text="← Prev", width=70, height=26, command=self.prev_duplicate_group
+        ).pack(side="left", padx=2)
+        ctk.CTkButton(
+            nav, text="Next →", width=70, height=26, command=self.next_duplicate_group
+        ).pack(side="left", padx=2)
 
         self.compare_frame = ctk.CTkFrame(right, fg_color="transparent")
         self.compare_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=(0, 4))
@@ -325,26 +368,37 @@ class ArchiveOrganiserApp(ctk.CTk):
         ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
             row,
+            text="Delete all extras (every group)",
+            command=self.delete_all_extras,
+            fg_color=DANGER,
+            hover_color=DANGER_HOVER,
+            height=28,
+        ).pack(side="right", padx=(6, 0))
+        ctk.CTkButton(
+            row,
             text="Quarantine all extras (every group)",
             command=self.quarantine_extras,
-            fg_color="#a65d00",
+            fg_color=WARNING,
             height=28,
         ).pack(side="right", padx=(6, 0))
         ctk.CTkButton(
             row,
             text="Permanently delete selected",
             command=self.delete_selected_compare_files,
-            fg_color="#8b1e1e",
-            hover_color="#6e1515",
+            fg_color=DANGER,
+            hover_color=DANGER_HOVER,
             height=28,
         ).pack(side="right", padx=(6, 0))
-        ctk.CTkButton(
+        primary_button(
             row,
             text="Quarantine selected",
             command=self.quarantine_selected_compare_files,
-            fg_color="#2a7a4b",
             height=28,
         ).pack(side="right", padx=(6, 0))
+
+        # ← / → move between groups when the Duplicates tab is active
+        self.bind_all("<Left>", self._on_duplicates_left_key, add="+")
+        self.bind_all("<Right>", self._on_duplicates_right_key, add="+")
 
     def _clear_group_list(self) -> None:
         for child in self.group_list.winfo_children():
@@ -447,13 +501,32 @@ class ArchiveOrganiserApp(ctk.CTk):
     def _populate_group_list(self) -> None:
         self._clear_group_list()
         self._clear_compare_panel()
+        self._group_list_shown = 0
         if not self.dup_report or not self.dup_report.groups:
-            ctk.CTkLabel(self.group_list, text="No duplicate groups found.").pack(
-                anchor="w", padx=4, pady=4
-            )
+            ctk.CTkLabel(
+                self.group_list,
+                text="No duplicate groups found.\nTry Exact on Overview after a scan.",
+                justify="left",
+                text_color=MUTED,
+            ).pack(anchor="w", padx=4, pady=4)
             return
+        self._append_group_page()
+        self.show_duplicate_group(0)
 
-        for index, group in enumerate(self.dup_report.groups):
+    def _append_group_page(self) -> None:
+        """Add the next page of group buttons (virtualized for 10k+ groups)."""
+        if not self.dup_report:
+            return
+        # Remove previous "Load more" control if present
+        for child in list(self.group_list.winfo_children()):
+            if getattr(child, "_is_load_more", False):
+                child.destroy()
+
+        groups = self.dup_report.groups
+        start = self._group_list_shown
+        end = min(len(groups), start + self._group_page_size)
+        for index in range(start, end):
+            group = groups[index]
             name = group.files[0].name
             if len(name) > 28:
                 name = name[:25] + "..."
@@ -472,29 +545,44 @@ class ArchiveOrganiserApp(ctk.CTk):
                 anchor="w",
                 height=42,
                 font=ctk.CTkFont(size=12),
-                fg_color=("gray75", "gray35"),
-                text_color=("gray10", "gray90"),
+                fg_color=LIST_BTN,
+                text_color=LIST_BTN_TEXT,
                 command=lambda i=index: self.show_duplicate_group(i),
             )
             btn.pack(fill="x", padx=1, pady=1)
             self._group_buttons.append(btn)
 
-        self.show_duplicate_group(0)
+        self._group_list_shown = end
+        if end < len(groups):
+            more = ctk.CTkButton(
+                self.group_list,
+                text=f"Load more groups ({end} / {len(groups)})",
+                height=32,
+                command=self._append_group_page,
+            )
+            more._is_load_more = True  # type: ignore[attr-defined]
+            more.pack(fill="x", padx=1, pady=6)
 
     def _highlight_group_button(self, index: int) -> None:
         for i, btn in enumerate(self._group_buttons):
-            if i == index:
-                btn.configure(fg_color=("#3a7ebf", "#1f538d"), text_color="white")
+            # Button i corresponds to group index i only for the first page;
+            # after Load more, buttons are sequential from 0..shown-1 matching groups 0..shown-1
+            group_index = i
+            if group_index == index:
+                btn.configure(fg_color=SELECT, text_color="white")
             else:
-                btn.configure(
-                    fg_color=("gray75", "gray35"),
-                    text_color=("gray10", "gray90"),
-                )
+                btn.configure(fg_color=LIST_BTN, text_color=LIST_BTN_TEXT)
 
     def show_duplicate_group(self, index: int) -> None:
         """Show every file in one duplicate group side by side (fills the pane)."""
         if not self.dup_report or index < 0 or index >= len(self.dup_report.groups):
             return
+        # Ensure the group button exists in the virtualized list
+        while self._group_list_shown <= index:
+            before = self._group_list_shown
+            self._append_group_page()
+            if self._group_list_shown == before:
+                break
         # Keep the user's sash layout when flipping between groups
         self._remember_compare_layout()
         group = self.dup_report.groups[index]
@@ -510,7 +598,7 @@ class ArchiveOrganiserApp(ctk.CTk):
             orient=tk.VERTICAL,
             sashwidth=10,
             sashrelief=tk.RAISED,
-            bg="#3a3a3a",
+            bg=paned_bg(),
         )
         vpaned.pack(fill="both", expand=True, padx=2, pady=2)
         self._compare_vpaned = vpaned
@@ -528,14 +616,14 @@ class ArchiveOrganiserApp(ctk.CTk):
             orient=tk.HORIZONTAL,
             sashwidth=10,
             sashrelief=tk.RAISED,
-            bg="#3a3a3a",
+            bg=paned_bg(),
         )
         h_bottom = tk.PanedWindow(
             bottom_host,
             orient=tk.HORIZONTAL,
             sashwidth=10,
             sashrelief=tk.RAISED,
-            bg="#3a3a3a",
+            bg=paned_bg(),
         )
         h_top.grid(row=0, column=0, sticky="nsew")
         h_bottom.grid(row=0, column=0, sticky="nsew")
@@ -560,9 +648,17 @@ class ArchiveOrganiserApp(ctk.CTk):
         self.after(40, self._restore_compare_layout)
         self.after(200, self._restore_compare_layout)
 
+        # Default: all extras selected (KEEP left unticked); focus so ← → work
+        self.select_extras_in_group()
+        try:
+            self.focus_set()
+        except Exception:
+            pass
+
         self._set_status(
             f"Viewing group {index + 1}/{len(self.dup_report.groups)} · "
-            f"{group.label} · {count} files · {format_bytes(group.size)}"
+            f"{group.label} · {count} files · {format_bytes(group.size)} · "
+            "← → for Prev/Next"
         )
 
     def prev_duplicate_group(self) -> None:
@@ -578,10 +674,47 @@ class ArchiveOrganiserApp(ctk.CTk):
         last = len(self.dup_report.groups) - 1
         self.show_duplicate_group(min(last, current + 1))
 
+    def _duplicates_tab_active(self) -> bool:
+        try:
+            return self.tabs.get() == "Duplicates"
+        except Exception:
+            return False
+
+    def _focus_is_text_input(self, widget) -> bool:
+        """True when the user is typing in an entry/textbox (don't steal arrow keys)."""
+        w = widget
+        for _ in range(12):
+            if w is None:
+                break
+            name = w.__class__.__name__
+            if name in ("CTkEntry", "CTkTextbox", "Entry", "Text", "TEntry"):
+                return True
+            try:
+                w = w.master
+            except Exception:
+                break
+        return False
+
+    def _on_duplicates_left_key(self, event) -> Optional[str]:
+        if not self._duplicates_tab_active():
+            return None
+        if self._focus_is_text_input(event.widget):
+            return None
+        self.prev_duplicate_group()
+        return "break"
+
+    def _on_duplicates_right_key(self, event) -> Optional[str]:
+        if not self._duplicates_tab_active():
+            return None
+        if self._focus_is_text_input(event.widget):
+            return None
+        self.next_duplicate_group()
+        return "break"
+
     def _build_preview_column(
         self, parent, info: FileInfo, role: str, total_cards: int = 2
     ) -> ctk.CTkFrame:
-        """Top-row cell: role title + Preview content."""
+        """Top-row cell: role title + Preview content (always something visual)."""
         col = ctk.CTkFrame(parent)
         col.grid_columnconfigure(0, weight=1)
         col.grid_rowconfigure(2, weight=1)
@@ -589,20 +722,31 @@ class ArchiveOrganiserApp(ctk.CTk):
         ctk.CTkLabel(col, text=role, font=ctk.CTkFont(size=13, weight="bold")).grid(
             row=0, column=0, sticky="w", padx=8, pady=(8, 2)
         )
+        preview = load_preview_for_info(info, role)
+        kind_label = {
+            "image": "Preview",
+            "text": "Text extract / binary sample",
+            "composite": "Preview + binary sample",
+        }.get(preview.kind, "Preview")
         ctk.CTkLabel(
             col,
-            text="Preview",
+            text=kind_label,
             font=ctk.CTkFont(size=11),
-            text_color=("gray40", "gray70"),
+            text_color=MUTED,
         ).grid(row=1, column=0, sticky="w", padx=8, pady=(0, 2))
 
-        preview = load_preview_for_info(info, role)
         preview_host = ctk.CTkFrame(col, fg_color=("gray90", "gray20"))
         preview_host.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 6))
         preview_host.grid_columnconfigure(0, weight=1)
         preview_host.grid_rowconfigure(0, weight=1)
 
-        if preview.kind == "image" and preview.image is not None:
+        show_image = preview.image is not None and preview.kind in ("image", "composite")
+        show_text = bool(preview.text_content or preview.error) and preview.kind in (
+            "text",
+            "composite",
+        )
+        # Always show something: prefer image; if both, stack image then text
+        if show_image and not show_text:
             self._compare_pil_images.append(preview.image)
             max_side = self._compare_thumb_side(total_cards)
             pil = preview.image.copy()
@@ -612,10 +756,38 @@ class ArchiveOrganiserApp(ctk.CTk):
             img_label = ctk.CTkLabel(preview_host, text="", image=ctk_image)
             img_label.grid(row=0, column=0, padx=6, pady=6, sticky="nsew")
             self._compare_img_labels.append(img_label)
+        elif show_image and show_text:
+            preview_host.grid_rowconfigure(1, weight=1)
+            self._compare_pil_images.append(preview.image)
+            max_side = max(140, self._compare_thumb_side(total_cards) // 2)
+            pil = preview.image.copy()
+            pil.thumbnail((max_side, max_side))
+            ctk_image = ctk.CTkImage(light_image=pil, dark_image=pil, size=pil.size)
+            self._compare_image_refs.append(ctk_image)
+            img_label = ctk.CTkLabel(preview_host, text="", image=ctk_image)
+            img_label.grid(row=0, column=0, padx=6, pady=(6, 2), sticky="n")
+            self._compare_img_labels.append(img_label)
+            text_box = ctk.CTkTextbox(preview_host, height=120)
+            text_box.grid(row=1, column=0, padx=4, pady=(0, 4), sticky="nsew")
+            text_box.insert("1.0", preview.text_content or preview.error)
+            text_box.configure(state="disabled")
         else:
             text_box = ctk.CTkTextbox(preview_host)
             text_box.grid(row=0, column=0, padx=4, pady=4, sticky="nsew")
-            content = preview.text_content or preview.error or "No preview text"
+            content = preview.text_content or preview.error or "No preview available"
+            # If we have a type-card image but kind was text-only, still show the card
+            if preview.image is not None:
+                self._compare_pil_images.append(preview.image)
+                max_side = self._compare_thumb_side(total_cards)
+                pil = preview.image.copy()
+                pil.thumbnail((max_side, max_side))
+                ctk_image = ctk.CTkImage(light_image=pil, dark_image=pil, size=pil.size)
+                self._compare_image_refs.append(ctk_image)
+                img_label = ctk.CTkLabel(preview_host, text="", image=ctk_image)
+                img_label.grid(row=0, column=0, padx=6, pady=(6, 2), sticky="n")
+                self._compare_img_labels.append(img_label)
+                preview_host.grid_rowconfigure(1, weight=1)
+                text_box.grid(row=1, column=0, padx=4, pady=(0, 4), sticky="nsew")
             text_box.insert("1.0", content)
             text_box.configure(state="disabled")
 
@@ -643,7 +815,9 @@ class ArchiveOrganiserApp(ctk.CTk):
         actions = ctk.CTkFrame(col, fg_color="transparent")
         actions.grid(row=2, column=0, sticky="ew", padx=8, pady=(2, 8))
 
-        check_var = tk.BooleanVar(value=(role != "KEEP (oldest)"))
+        check_var = tk.BooleanVar(
+            value=(role != "KEEP (oldest)" and not info.is_inside_archive)
+        )
         select_text = "Select for remove/delete"
         if info.is_inside_archive:
             select_text = "Inside zip (can't quarantine alone)"
@@ -706,8 +880,11 @@ class ArchiveOrganiserApp(ctk.CTk):
             self._set_status(f"Opened folder for: {path.name}")
 
     def select_extras_in_group(self) -> None:
-        for i, var in enumerate(self._compare_check_vars):
-            var.set(i > 0)
+        """Select every extra copy (not KEEP); skip zip members."""
+        for i, (var, info) in enumerate(
+            zip(self._compare_check_vars, self._compare_file_infos)
+        ):
+            var.set(i > 0 and not info.is_inside_archive)
 
     def select_all_in_group(self) -> None:
         for var in self._compare_check_vars:
@@ -754,7 +931,9 @@ class ArchiveOrganiserApp(ctk.CTk):
         self.dup_report.groups = remaining_groups
 
         if self.scan_result:
+            self.scan_result.ensure_files_loaded()
             self.scan_result.files = [f for f in self.scan_result.files if still_here(f)]
+            self.scan_result.file_count = len(self.scan_result.files)
 
         self.dup_summary.configure(
             text=(
@@ -881,7 +1060,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         )
         self.layout_hint = ctk.CTkLabel(
             left,
-            text="Scan a folder first — recommended layouts will appear here.",
+            text="Tick one or more layouts to combine. Scan first for recommendations.",
             justify="left",
             anchor="w",
             font=ctk.CTkFont(size=11),
@@ -889,15 +1068,32 @@ class ArchiveOrganiserApp(ctk.CTk):
         )
         self.layout_hint.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 4))
 
-        self.layout_var = tk.StringVar(value="type_date")
-        self.layout_radios_frame = ctk.CTkScrollableFrame(left, height=120)
-        self.layout_radios_frame.grid(row=2, column=0, sticky="nsew", padx=6, pady=(0, 4))
-        self.layout_radios_frame.grid_columnconfigure(0, weight=1)
-        self._layout_radio_widgets: list[ctk.CTkRadioButton] = []
+        self.layout_vars: dict[str, tk.BooleanVar] = {}
+        self.layout_check_frame = ctk.CTkScrollableFrame(left, height=140)
+        self.layout_check_frame.grid(row=2, column=0, sticky="nsew", padx=6, pady=(0, 4))
+        self.layout_check_frame.grid_columnconfigure(0, weight=1)
+        self._layout_check_widgets: list[ctk.CTkCheckBox] = []
 
-        # Category include + sub-folder options
+        safety = ctk.CTkFrame(left, fg_color="transparent")
+        safety.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 4))
+        self.copy_instead_var = tk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            safety,
+            text="Copy files (safer) instead of moving",
+            variable=self.copy_instead_var,
+            command=self._update_layout_visual,
+        ).pack(anchor="w")
+        self.show_advanced_org_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            safety,
+            text="Show advanced options (categories, naming, custom)",
+            variable=self.show_advanced_org_var,
+            command=self._toggle_organise_advanced,
+        ).pack(anchor="w", pady=(4, 0))
+
+        # Category include + sub-folder options (collapsed by default)
         opts = ctk.CTkScrollableFrame(left, height=220)
-        opts.grid(row=3, column=0, sticky="ew", padx=6, pady=(0, 6))
+        self.organise_advanced_frame = opts
         opts.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             opts, text="Include categories", font=ctk.CTkFont(size=12, weight="bold")
@@ -947,16 +1143,15 @@ class ArchiveOrganiserApp(ctk.CTk):
             text="Archive best practices",
             font=ctk.CTkFont(size=12, weight="bold"),
         ).grid(row=6, column=0, sticky="w", padx=6, pady=(8, 2))
-        self.copy_instead_var = tk.BooleanVar(value=True)
         self.date_prefix_var = tk.BooleanVar(value=False)
         self.sanitize_names_var = tk.BooleanVar(value=True)
         self.readme_notes_var = tk.BooleanVar(value=True)
         self.archive_days_var = tk.StringVar(value="365")
-        ctk.CTkCheckBox(
+        ctk.CTkLabel(
             opts,
-            text="Copy files (safer) instead of moving",
-            variable=self.copy_instead_var,
-            command=self._update_layout_visual,
+            text="(Copy vs move is above — kept visible for safety)",
+            font=ctk.CTkFont(size=11),
+            text_color=MUTED,
         ).grid(row=7, column=0, sticky="w", padx=8, pady=2)
         ctk.CTkCheckBox(
             opts,
@@ -1042,11 +1237,10 @@ class ArchiveOrganiserApp(ctk.CTk):
         ctk.CTkButton(
             row, text="Show tips", width=100, command=self.show_organisation_tips
         ).pack(side="left", padx=(0, 8))
-        self.btn_apply_org = ctk.CTkButton(
+        self.btn_apply_org = primary_button(
             row,
             text="Apply organise",
             command=self.apply_organise,
-            fg_color="#2a7a4b",
         )
         self.btn_apply_org.pack(side="right")
 
@@ -1059,12 +1253,26 @@ class ArchiveOrganiserApp(ctk.CTk):
 
         self._last_organise_plan = None
         self._rebuild_layout_options(recommended=["type_date"])
+        self._toggle_organise_advanced()
+
+    def _toggle_organise_advanced(self) -> None:
+        frame = getattr(self, "organise_advanced_frame", None)
+        if frame is None:
+            return
+        if self.show_advanced_org_var.get():
+            frame.grid(row=4, column=0, sticky="nsew", padx=6, pady=(0, 6))
+            try:
+                frame.master.grid_rowconfigure(4, weight=1)
+            except Exception:
+                pass
+        else:
+            frame.grid_remove()
 
     def _rebuild_layout_options(self, recommended: Optional[list[str]] = None) -> None:
-        """Rebuild the layout radio list; recommended IDs are shown first with a mark."""
-        for child in self.layout_radios_frame.winfo_children():
+        """Rebuild layout checkboxes; tick one or more to combine folder structures."""
+        for child in self.layout_check_frame.winfo_children():
             child.destroy()
-        self._layout_radio_widgets.clear()
+        self._layout_check_widgets.clear()
 
         order = recommended or [p.id for p in LAYOUT_PRESETS]
         seen: set[str] = set()
@@ -1077,9 +1285,13 @@ class ArchiveOrganiserApp(ctk.CTk):
             if preset.id not in seen:
                 ordered_ids.append(preset.id)
 
+        previous = {
+            lid: var.get() for lid, var in self.layout_vars.items()
+        } if self.layout_vars else {}
+        self.layout_vars = {}
+
         best = ordered_ids[0] if ordered_ids else "type_date"
-        if self.layout_var.get() not in seen:
-            self.layout_var.set(best)
+        any_prev = any(previous.values())
 
         for row_i, layout_id in enumerate(ordered_ids):
             preset = get_layout(layout_id)
@@ -1088,19 +1300,47 @@ class ArchiveOrganiserApp(ctk.CTk):
             if recommended and layout_id in recommended[:3] and layout_id != recommended[0]:
                 useful = "  (fits your files)"
             text = f"{preset.name}{mark}{useful}"
-            radio = ctk.CTkRadioButton(
-                self.layout_radios_frame,
+            if any_prev:
+                default_on = bool(previous.get(layout_id, False))
+            else:
+                default_on = layout_id == best
+            var = tk.BooleanVar(value=default_on)
+            self.layout_vars[layout_id] = var
+            box = ctk.CTkCheckBox(
+                self.layout_check_frame,
                 text=text,
-                variable=self.layout_var,
-                value=preset.id,
+                variable=var,
                 command=self._on_layout_chosen,
             )
-            radio.grid(row=row_i, column=0, sticky="w", padx=4, pady=2)
-            self._layout_radio_widgets.append(radio)
+            box.grid(row=row_i, column=0, sticky="w", padx=4, pady=2)
+            self._layout_check_widgets.append(box)
 
+        if not any(var.get() for var in self.layout_vars.values()):
+            self.layout_vars[best].set(True)
         self._on_layout_chosen()
 
+    def _selected_layout_ids(self) -> list[str]:
+        ids = [lid for lid, var in self.layout_vars.items() if var.get()]
+        if not ids:
+            return ["type_date"]
+        # Custom cannot mix with other layouts
+        if "custom" in ids and len(ids) > 1:
+            for lid, var in self.layout_vars.items():
+                var.set(lid == "custom")
+            return ["custom"]
+        return ids
+
     def _on_layout_chosen(self) -> None:
+        # If user ticks Custom with others, keep Custom only
+        if self.layout_vars.get("custom") and self.layout_vars["custom"].get():
+            others = [lid for lid, var in self.layout_vars.items() if lid != "custom" and var.get()]
+            if others:
+                for lid in others:
+                    self.layout_vars[lid].set(False)
+        if not any(var.get() for var in self.layout_vars.values()):
+            # Always keep at least one layout
+            fallback = "type_date" if "type_date" in self.layout_vars else next(iter(self.layout_vars))
+            self.layout_vars[fallback].set(True)
         self._update_layout_visual()
 
     def _current_organise_options(self) -> OrganiseOptions:
@@ -1123,13 +1363,15 @@ class ArchiveOrganiserApp(ctk.CTk):
         )
 
     def _update_layout_visual(self) -> None:
-        """Refresh the visual folder-tree for the selected layout and options."""
-        files = self.scan_result.files if self.scan_result else []
+        """Refresh the visual folder-tree for the selected layout(s) and options."""
+        files = self._scan_files() if self.scan_result else []
         dest = self.dest_entry.get().strip() if hasattr(self, "dest_entry") else ""
-        layout_id = self.layout_var.get()
+        layout_ids = self._selected_layout_ids()
         options = self._current_organise_options()
-        tree = layout_tree_text(files, dest, layout_id, options=options)
-        preset = get_layout(layout_id)
+        tree = layout_tree_text(
+            files, dest, layout_ids=layout_ids, options=options
+        )
+        label = layout_combo_label(layout_ids)
         flags = (
             f"Practices: copy={options.copy_instead_of_move} · "
             f"date prefix={options.rename_with_date_prefix} · "
@@ -1137,14 +1379,20 @@ class ArchiveOrganiserApp(ctk.CTk):
             f"README={options.add_readme_notes} · "
             f"archive>{options.archive_older_than_days}d"
         )
-        text = f"{preset.description}\n{flags}\n\n{tree}"
+        combo_note = ""
+        if len(layout_ids) > 1:
+            combo_note = (
+                "\nCombining layouts: folder parts are nested "
+                "(duplicate folder names skipped).\n"
+            )
+        text = f"{label}{combo_note}\n{flags}\n\n{tree}"
         self.layout_tree_box.configure(state="normal")
         self.layout_tree_box.delete("1.0", "end")
         self.layout_tree_box.insert("1.0", text)
         self.layout_tree_box.configure(state="disabled")
 
     def _refresh_layout_options_from_scan(self) -> None:
-        if not self.scan_result or not self.scan_result.files:
+        if not self._has_scan_files():
             self.layout_hint.configure(
                 text="Scan a folder first — recommended layouts will appear here."
             )
@@ -1152,19 +1400,23 @@ class ArchiveOrganiserApp(ctk.CTk):
                 var.set(True)
             self._rebuild_layout_options(recommended=["type_date"])
             return
+        files = self._scan_files()
         counts: dict[str, int] = {}
-        for info in self.scan_result.files:
+        for info in files:
             counts[info.category] = counts.get(info.category, 0) + 1
         summary = ", ".join(f"{k}: {v}" for k, v in sorted(counts.items()))
-        recommended = recommended_layout_ids(self.scan_result.files)
+        recommended = recommended_layout_ids(files)
         best = get_layout(recommended[0])
         self.layout_hint.configure(
-            text=f"Based on your scan ({summary}). Suggested: {best.name}."
+            text=(
+                f"Based on your scan ({summary}). Suggested: {best.name}. "
+                "Tick extra layouts to combine folders."
+            )
         )
-        # Tick only categories that exist in the scan (others off but still available)
         for cat, var in self.category_vars.items():
             var.set(counts.get(cat, 0) > 0)
-        self.layout_var.set(recommended[0])
+        # Fresh recommendation tick (rebuild defaults to top recommended)
+        self.layout_vars = {}
         self._rebuild_layout_options(recommended=recommended)
 
     def _build_help_tab(self) -> None:
@@ -1175,59 +1427,40 @@ class ArchiveOrganiserApp(ctk.CTk):
         help_box.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         help_box.insert(
             "1.0",
-            """HOW TO USE (first draft)
+            """HOW TO USE
 
 1. Sources tab
-   • Click “Add folder / drive”. A file-manager style picker opens.
-   • Tick sources in the list to select them; use Remove selected / Select all / Open.
-   • Optionally tick “Include junk / system folders” and “Scan inside .zip archives”.
-   • Click “Scan now”. Wait until the status says the scan is complete.
+   • Add folder / drive. Tick rows to select; Remove selected / Open as needed.
+   • Leave “Scan inside .zip” off for huge drives (you can turn it on for small libraries).
+   • Click Scan now. Large libraries use an on-disk SQLite index so RAM stays sane.
 
 2. Overview tab
-   • Read the summary (counts by type, total size, and how long the scan took).
-   • Optionally save a text report (includes scan + later duplicate timing).
-   • Tick Exact / Similar photos / Similar docs, then click “Find duplicates”.
-   • Tip for whole drives: start with Exact only; add Similar after Exact finishes.
-   • Status bar shows live elapsed time like [12m 34s] while work runs.
+   • Read counts, size, and timing. Save a report if you like.
+   • Tick Exact (recommended). Similar photos/docs are optional and capped.
+   • Click Find duplicates — then you are taken to the Duplicates tab.
 
 3. Duplicates tab
-   • Left: full list of every duplicate group found (Exact, Photo≈, Doc≈).
-   • Drag sashes to resize: group list ↔ compare, KEEP ↔ Copy cards, Preview ↔ File info.
-   • Click a group to open a side-by-side visual compare on the right.
-   • Every file type gets a Preview: image/page/frame, text, waveform, archive list, or hex bytes.
-   • Photos: matched by similar name and/or similar look (visual fingerprint).
-   • Documents: matched by similar name and/or similar text content.
-   • Files inside zips appear for compare; quarantine acts on real disk files only.
+   • Left: duplicate groups (loads in pages — use Load more on huge results).
+   • Click a group for side-by-side compare. Drag sashes to resize panes.
+   • Every file shows a best-effort Preview (image/page/frame/waveform/text) or a
+     type card + binary sample — not a full proprietary document renderer.
+   • Prefer Quarantine selected. Permanent delete needs two confirmations.
+   • Zip members can be compared; quarantine applies to real disk files only.
 
 4. Organise tab
-   • Choose a destination folder outside your scan sources (required for real copy/move).
-   • Pick a layout or Custom structure; tick categories / best-practice options (Copy is safer).
-   • Always click Preview plan first, then Browse dry-run if you like.
-   • Keep Dry run on for a first try; untick only after you have previewed the same options.
-   • MOVE needs two confirmations. Prefer Copy, then delete originals later if happy.
+   • Destination must be outside your scan sources for real copy/move.
+   • Tick one or more folder layouts to combine (folders nest together).
+   • Keep Copy + Dry run on at first. Preview plan, then Apply.
+   • Advanced / custom options can stay collapsed until you need them.
+   • Custom structure cannot mix with other layouts (Custom alone).
 
-BEST PRACTICES (from digital organisation guides)
-• Shallow trees: prefer a few clear top folders over deep nesting.
-• Life areas: Personal / Media / Finance / Archive — a common personal structure.
-• PARA-style: Areas (ongoing), Resources (reference), Archives (finished/old).
-• Active vs Archive: keep recent work handy; move older material aside.
-• Naming: YYYY-MM-DD_descriptive-name; avoid odd characters; clear version names.
-• Safer transfers: Copy first, verify, then optionally remove originals.
-• Document the system: inventory list + short README notes in key folders.
-• Habit: clear Inbox/Downloads regularly; remove duplicates; review monthly.
+LARGE DRIVES (1TB+)
+• Exact duplicates: size buckets → partial CRC → full CRC only on collisions.
+• Stay on one mount (default). Zip listing is capped per archive and overall.
+• Cancel stays available; status shows file counts and sizes while working.
 
 PRIVACY & SAFETY
-• This app does not upload your files or talk to the internet for organising.
-• Scanning and hashing happen only on your machine.
-• Prefer quarantine over permanent delete. You can restore quarantined files.
-• Start with a small test folder before pointing at your whole archive.
-
-TIPS
-• Plug in external drives and make sure they appear in your file manager first.
-• On Linux, drives often appear under /media/YOURNAME/ or /mnt/.
-• Re-scan after plugging in a new drive if you add more sources.
-• Large archives take time to fingerprint — leave the window open while it works.
-• Use “Show tips” on the Organise tab for advice matched to your scan.
+• Nothing is uploaded. Prefer quarantine. Test on a small folder first.
 """,
         )
         help_box.configure(state="disabled")
@@ -1379,6 +1612,25 @@ TIPS
         self._refresh_source_list()
         self._set_status("Cleared source list.")
 
+    def _on_appearance_change(self, mode: str) -> None:
+        ctk.set_appearance_mode(mode)
+        # Refresh paned sash colors on next rebuild; banner stays readable
+        try:
+            if getattr(self, "dup_paned", None) is not None:
+                self.dup_paned.configure(bg=paned_bg())
+        except Exception:
+            pass
+
+    def _has_scan_files(self) -> bool:
+        if not self.scan_result:
+            return False
+        return self.scan_result.file_count > 0 or bool(self.scan_result.files)
+
+    def _scan_files(self) -> list[FileInfo]:
+        if not self.scan_result:
+            return []
+        return self.scan_result.ensure_files_loaded()
+
     # ---------- scan ----------
 
     def start_scan(self) -> None:
@@ -1411,23 +1663,40 @@ TIPS
         self._update_overview()
         self._clear_group_list()
         self._clear_compare_panel()
-        self.dup_summary.configure(text="Duplicates not searched yet. Use Find duplicates on Overview.")
+        self.dup_summary.configure(
+            text="Scan ready. Click Find duplicates on Overview (Exact is safest for huge drives)."
+        )
         self._refresh_layout_options_from_scan()
         self.tabs.set("Overview")
+        self.workflow_banner.configure(
+            text="Next: review Overview, then Find duplicates (Exact). Open Duplicates to compare."
+        )
         took = format_duration(result.duration_seconds)
-        self._set_status(f"Scan finished: {len(result.files)} files in {took}.")
+        n = result.file_count or len(result.files)
+        self._set_status(f"Scan finished: {n} files in {took}.")
 
     def _update_overview(self) -> None:
         if not self.scan_result:
             return
-        files = self.scan_result.files
-        total_size = sum(f.size for f in files)
-        by_cat: dict[str, int] = {}
-        for f in files:
-            by_cat[f.category] = by_cat.get(f.category, 0) + 1
+        result = self.scan_result
+        store = result.store
+        if store is not None:
+            total_size = result.total_bytes or store.total_bytes()
+            by_cat = store.category_counts()
+            file_count = result.file_count or store.count()
+            disk_files = store.disk_file_count()
+            sample = store.sample_paths(40)
+        else:
+            files = result.files
+            total_size = sum(f.size for f in files) or result.total_bytes
+            by_cat = {}
+            for f in files:
+                by_cat[f.category] = by_cat.get(f.category, 0) + 1
+            file_count = len(files)
+            disk_files = sum(1 for f in files if not f.is_inside_archive)
+            sample = files[:40]
 
-        disk_files = sum(1 for f in files if not f.is_inside_archive)
-        took = format_duration(self.scan_result.duration_seconds)
+        took = format_duration(result.duration_seconds)
 
         readonly_sources = []
         for src in self.source_paths:
@@ -1438,14 +1707,20 @@ TIPS
                 pass
 
         lines = [
-            f"Files found: {len(files)}",
+            f"Files found: {file_count}",
             f"  · On disk: {disk_files}",
-            f"  · Inside zips: {self.scan_result.archive_members}",
+            f"  · Inside zips: {result.archive_members}",
             f"Total size: {format_bytes(total_size)}",
             f"Scan duration: {took}",
-            f"Skipped / unreadable: {self.scan_result.skipped}",
-            f"Errors: {len(self.scan_result.errors)}",
+            f"Skipped / unreadable: {result.skipped}",
+            f"Errors: {len(result.errors)}",
         ]
+        if result.cross_device_skipped:
+            lines.append(f"Other-mount folders skipped: {result.cross_device_skipped}")
+        if result.zip_members_capped:
+            lines.append(f"Zip listing caps hit: {result.zip_members_capped}")
+        if store is not None:
+            lines.append("Index: SQLite (large-drive mode)")
         if readonly_sources:
             lines.append("")
             lines.append(
@@ -1458,15 +1733,15 @@ TIPS
         for cat in sorted(by_cat):
             lines.append(f"  • {cat}: {by_cat[cat]}")
 
-        if self.scan_result.errors:
+        if result.errors:
             lines.append("")
             lines.append("Errors (first 20):")
-            for err in self.scan_result.errors[:20]:
+            for err in result.errors[:20]:
                 lines.append(f"  - {err}")
 
         lines.append("")
         lines.append("Sample paths (first 40):")
-        for info in files[:40]:
+        for info in sample:
             junk = " [junk]" if info.is_junk_location else ""
             lines.append(f"  [{info.category}]{junk} {info.display_path}")
 
@@ -1477,12 +1752,12 @@ TIPS
         )
 
         summary = (
-            f"{len(files)} files · {format_bytes(total_size)} · "
+            f"{file_count} files · {format_bytes(total_size)} · "
             f"scan {took} · "
             + ", ".join(f"{k}: {v}" for k, v in sorted(by_cat.items()))
         )
-        if self.scan_result.archive_members:
-            summary += f" · {self.scan_result.archive_members} inside zips"
+        if result.archive_members:
+            summary += f" · {result.archive_members} inside zips"
         self.overview_summary.configure(text=summary)
         self._write_box(self.overview_box, "\n".join(lines))
 
@@ -1506,17 +1781,27 @@ TIPS
     def start_duplicate_search(self) -> None:
         if self._busy:
             return
-        if not self.scan_result or not self.scan_result.files:
+        if not self.scan_result or (
+            self.scan_result.file_count <= 0 and not self.scan_result.files
+        ):
             messagebox.showwarning(APP_TITLE, "Run a scan first.")
             return
-        docs = sum(
-            1
-            for f in self.scan_result.files
-            if f.category == "Documents" and not f.is_inside_archive
-        )
-        photos = sum(
-            1 for f in self.scan_result.files if f.category == "Photos" and not f.is_inside_archive
-        )
+        store = self.scan_result.store
+        if store is not None:
+            cats = store.category_counts()
+            docs = cats.get("Documents", 0)
+            photos = cats.get("Photos", 0)
+        else:
+            docs = sum(
+                1
+                for f in self.scan_result.files
+                if f.category == "Documents" and not f.is_inside_archive
+            )
+            photos = sum(
+                1
+                for f in self.scan_result.files
+                if f.category == "Photos" and not f.is_inside_archive
+            )
         tip = ""
         if self.dup_docs_var.get() and docs > 5000:
             tip += (
@@ -1546,11 +1831,14 @@ TIPS
         )
         if not (options.exact or options.similar_photos or options.similar_documents):
             options.exact = True
+        store = self.scan_result.store if self.scan_result else None
+        files = self._scan_files() if self.scan_result else []
         report = find_duplicate_matches(
-            self.scan_result.files if self.scan_result else [],
+            files,
             options=options,
             status_cb=lambda msg: self.after(0, self._set_status, msg),
             should_cancel=self._should_cancel,
+            store=store,
         )
         self.after(0, self._dup_done, report)
 
@@ -1575,6 +1863,9 @@ TIPS
             self._append_overview_timing_block(report)
 
         self.tabs.set("Duplicates")
+        self.workflow_banner.configure(
+            text="Duplicates ready — click a group to compare. Prefer Quarantine over permanent delete."
+        )
         self.update_idletasks()
         try:
             self._populate_group_list()
@@ -1615,20 +1906,10 @@ TIPS
         self._write_box(self.overview_box, current + "\n" + "\n".join(extra) + "\n")
 
     def quarantine_extras(self) -> None:
-        if not self.dup_report or not self.dup_report.groups:
-            messagebox.showinfo(APP_TITLE, "No duplicate extras to quarantine.")
+        extras = self._all_disk_extras()
+        if extras is None:
             return
-        extras = []
-        for group in self.dup_report.groups:
-            extras.extend(f for f in group.files[1:] if not f.is_inside_archive)
         count = len(extras)
-        if count == 0:
-            messagebox.showinfo(
-                APP_TITLE,
-                "No extra copies on disk to quarantine "
-                "(zip members cannot be quarantined alone).",
-            )
-            return
         qpath = quarantine_root()
         ok = messagebox.askyesno(
             APP_TITLE,
@@ -1649,6 +1930,58 @@ TIPS
         )
         self._set_status(f"Quarantined {count} files → {session}")
 
+    def delete_all_extras(self) -> None:
+        """Permanently delete every extra copy across all groups (keeps oldest KEEP)."""
+        extras = self._all_disk_extras()
+        if extras is None:
+            return
+        count = len(extras)
+        reclaim = sum(e.size for e in extras)
+        ok = messagebox.askyesno(
+            APP_TITLE,
+            "DELETE ALL DUPLICATE EXTRAS\n\n"
+            f"This permanently erases {count} extra file(s) "
+            f"(~{format_bytes(reclaim)}) across every duplicate group.\n\n"
+            "The oldest file in each group is kept.\n"
+            "Zip members are skipped (cannot delete inside a zip alone).\n\n"
+            "This cannot be undone by this app.\n"
+            "Prefer “Quarantine all extras” if you might want files back.\n\n"
+            "Continue?",
+        )
+        if not ok:
+            return
+        ok2 = messagebox.askyesno(
+            APP_TITLE,
+            f"Final confirmation: permanently delete all {count} extra duplicate(s)?",
+        )
+        if not ok2:
+            return
+        log = permanently_delete([e.path for e in extras])
+        paths = {e.path for e in extras}
+        self._remove_paths_from_reports(paths)
+        messagebox.showinfo(
+            APP_TITLE,
+            f"Deleted {count} extra duplicate(s).\n\n" + "\n".join(log[:12]),
+        )
+        self._set_status(f"Permanently deleted {count} extra duplicate(s).")
+
+    def _all_disk_extras(self) -> Optional[list[FileInfo]]:
+        """Extra (non-KEEP) on-disk files from every group, or None if nothing to do."""
+        if not self.dup_report or not self.dup_report.groups:
+            messagebox.showinfo(APP_TITLE, "No duplicate extras found. Run Find duplicates first.")
+            return None
+        extras: list[FileInfo] = []
+        for group in self.dup_report.groups:
+            extras.extend(f for f in group.files[1:] if not f.is_inside_archive)
+        if not extras:
+            messagebox.showinfo(
+                APP_TITLE,
+                "No extra copies on disk "
+                "(zip members cannot be removed alone).",
+            )
+            return None
+        return extras
+
     # ---------- organise ----------
 
     def choose_dest(self) -> None:
@@ -1668,7 +2001,7 @@ TIPS
             messagebox.showwarning(APP_TITLE, warn)
 
     def preview_organise(self) -> None:
-        if not self.scan_result or not self.scan_result.files:
+        if not self._has_scan_files():
             messagebox.showwarning(APP_TITLE, "Run a scan first.")
             return
         dest = self.dest_entry.get().strip()
@@ -1678,16 +2011,16 @@ TIPS
         warn = destination_conflicts_with_sources(dest, self.source_paths)
         if warn and not messagebox.askyesno(APP_TITLE, warn + "\n\nPreview anyway?"):
             return
-        layout_id = self.layout_var.get()
-        preset = get_layout(layout_id)
+        layout_ids = self._selected_layout_ids()
+        label = layout_combo_label(layout_ids)
         options = self._current_organise_options()
         plan = build_organise_plan(
-            self.scan_result.files, dest, layout_id=layout_id, options=options
+            self._scan_files(), dest, layout_ids=layout_ids, options=options
         )
         self._last_organise_plan = plan
         self._update_layout_visual()
         lines = [
-            f"Layout: {preset.name}",
+            f"Layout: {label}",
             f"Categories: {', '.join(sorted(options.categories or []))}",
             f"Media by date: {options.media_by_date} · Docs by extension: {options.documents_by_ext} · Separate archives: {options.separate_archives}",
             f"Copy (safer): {options.copy_instead_of_move} · Date prefix: {options.rename_with_date_prefix} · Sanitize names: {options.sanitize_filenames}",
@@ -1708,33 +2041,34 @@ TIPS
             for s in plan.skipped[:30]:
                 lines.append(f"  - {s}")
         self._write_box(self.org_box, "\n".join(lines))
-        self._organise_preview_key = self._organise_plan_key(dest, layout_id, options)
+        self._organise_preview_key = self._organise_plan_key(dest, layout_ids, options)
         self._last_organise_plan = plan
-        self._set_status(f"Organise preview ({preset.name}): {len(plan.items)} actions planned.")
+        self._set_status(f"Organise preview ({label}): {len(plan.items)} actions planned.")
 
-    def _organise_plan_key(self, dest: str, layout_id: str, options: OrganiseOptions) -> str:
+    def _organise_plan_key(self, dest: str, layout_ids, options: OrganiseOptions) -> str:
         cats = ",".join(sorted(options.categories or []))
+        layouts = "+".join(layout_ids) if isinstance(layout_ids, list) else str(layout_ids)
         return (
-            f"{dest}|{layout_id}|{cats}|{options.copy_instead_of_move}|"
+            f"{dest}|{layouts}|{cats}|{options.copy_instead_of_move}|"
             f"{options.rename_with_date_prefix}|{options.sanitize_filenames}|"
             f"{options.archive_older_than_days}|{options.custom_structure_text}"
         )
 
     def open_plan_browser(self) -> None:
         """Open a Dolphin-style browser of the last dry-run / preview plan."""
-        if not self.scan_result or not self.scan_result.files:
+        if not self._has_scan_files():
             messagebox.showwarning(APP_TITLE, "Run a scan first.")
             return
         dest = self.dest_entry.get().strip()
         if not dest:
             messagebox.showwarning(APP_TITLE, "Choose a destination folder.")
             return
-        layout_id = self.layout_var.get()
+        layout_ids = self._selected_layout_ids()
         options = self._current_organise_options()
         plan = self._last_organise_plan
         if plan is None or not plan.items:
             plan = build_organise_plan(
-                self.scan_result.files, dest, layout_id=layout_id, options=options
+                self._scan_files(), dest, layout_ids=layout_ids, options=options
             )
             self._last_organise_plan = plan
         if not plan.items:
@@ -1744,14 +2078,14 @@ TIPS
             self,
             plan,
             dest,
-            title=f"Dry-run browser — {get_layout(layout_id).name}",
+            title=f"Dry-run browser — {layout_combo_label(layout_ids)}",
         )
         win.focus()
 
     def apply_organise(self) -> None:
         if self._busy:
             return
-        if not self.scan_result or not self.scan_result.files:
+        if not self._has_scan_files():
             messagebox.showwarning(APP_TITLE, "Run a scan first.")
             return
         dest = self.dest_entry.get().strip()
@@ -1775,10 +2109,10 @@ TIPS
 
         warn = destination_conflicts_with_sources(dest, self.source_paths)
         dry = self.dry_run_var.get()
-        layout_id = self.layout_var.get()
-        preset = get_layout(layout_id)
+        layout_ids = self._selected_layout_ids()
+        label = layout_combo_label(layout_ids)
         options = self._current_organise_options()
-        plan_key = self._organise_plan_key(dest, layout_id, options)
+        plan_key = self._organise_plan_key(dest, layout_ids, options)
 
         # Safer: refuse risky destination for real copy/move (preview still allowed with confirm)
         if warn and not dry:
@@ -1802,7 +2136,7 @@ TIPS
             return
 
         plan = build_organise_plan(
-            self.scan_result.files, dest, layout_id=layout_id, options=options
+            self._scan_files(), dest, layout_ids=layout_ids, options=options
         )
         if not plan.items:
             messagebox.showinfo(APP_TITLE, "Nothing to organise with the current options.")
@@ -1812,7 +2146,7 @@ TIPS
             action = "COPY" if options.copy_instead_of_move else "MOVE"
             ok = messagebox.askyesno(
                 APP_TITLE,
-                f"Layout: {preset.name}\n"
+                f"Layout: {label}\n"
                 f"Action: {action} {len(plan.items)} files into:\n{dest}\n\n"
                 + (
                     "Copy keeps originals until you delete them later (safer).\n"
@@ -1906,7 +2240,7 @@ TIPS
             self._refresh_layout_options_from_scan()
 
     def save_inventory(self) -> None:
-        if not self.scan_result or not self.scan_result.files:
+        if not self._has_scan_files():
             messagebox.showwarning(APP_TITLE, "Run a scan first.")
             return
         path = filedialog.asksaveasfilename(
@@ -1916,11 +2250,11 @@ TIPS
         )
         if not path:
             return
-        text = build_inventory_text(self.scan_result.files, title="Archive Organiser inventory")
+        text = build_inventory_text(self._scan_files(), title="Archive Organiser inventory")
         Path(path).write_text(text, encoding="utf-8")
         self._set_status(f"Inventory saved: {path}")
 
     def show_organisation_tips(self) -> None:
-        files = self.scan_result.files if self.scan_result else []
+        files = self._scan_files() if self.scan_result else []
         tips = organisation_advice(files)
         messagebox.showinfo(APP_TITLE, "Organisation tips\n\n" + "\n\n".join(f"• {t}" for t in tips))

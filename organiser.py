@@ -32,6 +32,7 @@ class OrganisePlan:
     skipped: list[str] = field(default_factory=list)
     layout_id: str = "type_date"
     layout_name: str = ""
+    layout_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,72 @@ def get_layout(layout_id: str) -> LayoutPreset:
         if preset.id == layout_id:
             return preset
     return LAYOUT_PRESETS[0]
+
+
+def normalize_layout_ids(
+    layout_ids: Optional[list[str]] = None,
+    layout_id: str = "type_date",
+) -> list[str]:
+    """
+    Clean layout selection for organise.
+    - At least one id
+    - Unique, ordered like LAYOUT_PRESETS (stable combine order)
+    - Custom cannot combine with other layouts (custom wins alone)
+    """
+    raw = [x for x in (layout_ids or []) if x] or [layout_id or "type_date"]
+    seen: list[str] = []
+    for item in raw:
+        if item not in seen:
+            seen.append(item)
+    if "custom" in seen:
+        return ["custom"]
+    order = {p.id: i for i, p in enumerate(LAYOUT_PRESETS)}
+    return sorted(seen, key=lambda x: order.get(x, 999))
+
+
+def layout_combo_label(layout_ids: list[str]) -> str:
+    ids = normalize_layout_ids(layout_ids)
+    names = [get_layout(i).name for i in ids]
+    if len(names) == 1:
+        return names[0]
+    return " + ".join(names)
+
+
+def suggest_destination_combined(
+    info: FileInfo,
+    dest_root: Path,
+    layout_ids: Optional[list[str]] = None,
+    layout_id: str = "type_date",
+    options: Optional[OrganiseOptions] = None,
+) -> Path:
+    """
+    Build a destination path using one or more layouts.
+    Multiple layouts nest folder parts (duplicates skipped) then use one filename.
+    """
+    ids = normalize_layout_ids(layout_ids, layout_id)
+    if len(ids) == 1:
+        return suggest_destination(info, dest_root, layout_id=ids[0], options=options)
+
+    folder_parts: list[str] = []
+    file_name = info.path.name
+    for lid in ids:
+        path = suggest_destination(info, dest_root, layout_id=lid, options=options)
+        file_name = path.name
+        try:
+            rel_parent = path.parent.relative_to(dest_root.resolve())
+        except ValueError:
+            try:
+                rel_parent = path.parent.relative_to(dest_root)
+            except ValueError:
+                continue
+        if str(rel_parent) == ".":
+            continue
+        for part in rel_parent.parts:
+            if part not in folder_parts:
+                folder_parts.append(part)
+    if folder_parts:
+        return dest_root.joinpath(*folder_parts) / file_name
+    return dest_root / file_name
 
 
 def category_counts(files: list[FileInfo]) -> dict[str, int]:
@@ -338,17 +405,24 @@ def build_organise_plan(
     layout_id: str = "type_date",
     only_categories: Optional[set[str]] = None,
     options: Optional[OrganiseOptions] = None,
+    layout_ids: Optional[list[str]] = None,
 ) -> OrganisePlan:
     """
     Create a plan of moves. Does not change any files yet.
     Skips files already under the destination root, and quarantine files.
+    Pass layout_ids to combine multiple folder layouts (nested).
     """
     opts = options or OrganiseOptions(categories=only_categories)
     if only_categories is not None and opts.categories is None:
         opts.categories = only_categories
 
-    preset = get_layout(layout_id)
-    plan = OrganisePlan(layout_id=preset.id, layout_name=preset.name)
+    ids = normalize_layout_ids(layout_ids, layout_id)
+    label = layout_combo_label(ids)
+    plan = OrganisePlan(
+        layout_id="+".join(ids),
+        layout_name=label,
+        layout_ids=ids,
+    )
     dest = Path(dest_root).expanduser().resolve()
 
     for info in files:
@@ -380,7 +454,9 @@ def build_organise_plan(
             plan.skipped.append(f"Missing on disk: {current}")
             continue
 
-        suggested = suggest_destination(info, dest, layout_id=preset.id, options=opts)
+        suggested = suggest_destination_combined(
+            info, dest, layout_ids=ids, options=opts
+        )
         plan.items.append(
             OrganisePlanItem(
                 source=current,
@@ -394,25 +470,26 @@ def build_organise_plan(
 def layout_tree_text(
     files: list[FileInfo],
     dest_root: str,
-    layout_id: str,
+    layout_id: str = "type_date",
     options: Optional[OrganiseOptions] = None,
     max_folders: int = 100,
+    layout_ids: Optional[list[str]] = None,
 ) -> str:
     """
-    Build a visual folder-tree preview of the selected layout
+    Build a visual folder-tree preview of the selected layout(s)
     using the real scanned files (folder paths only).
     """
-    preset = get_layout(layout_id)
+    ids = normalize_layout_ids(layout_ids, layout_id)
+    label = layout_combo_label(ids)
     opts = options or OrganiseOptions()
     display_root = dest_root.strip() if dest_root.strip() else "Destination"
     placeholder = Path("/__preview__")
 
-    if layout_id == "custom":
+    if ids == ["custom"]:
         structure = parse_custom_structure(opts.custom_structure_text or "")
         header = custom_tree_preview(structure, display_root)
         if not files or not structure.rules:
             return header
-        # Continue to append implied folders from the scan below
         custom_header = header + "\n\nFolders your rules create for this scan:\n"
     else:
         custom_header = ""
@@ -422,10 +499,11 @@ def layout_tree_text(
     for info in files:
         if opts.categories is not None and info.category not in opts.categories:
             continue
-        # Skip zip members for organise destination plans (organise the zip as a whole)
         if info.is_inside_archive:
             continue
-        suggested = suggest_destination(info, placeholder, layout_id=layout_id, options=opts)
+        suggested = suggest_destination_combined(
+            info, placeholder, layout_ids=ids, options=opts
+        )
         rel = suggested.parent.relative_to(placeholder)
         if str(rel) == ".":
             continue
@@ -435,7 +513,7 @@ def layout_tree_text(
         included += 1
 
     lines = [
-        f"Layout: {preset.name}",
+        f"Layout: {label}",
         f"Files included: {included}",
         "",
         f"{display_root}/",
@@ -446,11 +524,9 @@ def layout_tree_text(
         lines.append("  (no folders — scan files and tick categories)")
         return "\n".join(lines)
 
-    # Render as a nested tree with box-drawing characters
     sorted_folders = sorted(folder_paths, key=lambda p: [x.lower() for x in p.parts])
     shown = sorted_folders[:max_folders]
 
-    # Group by whether each node is the last among siblings for nicer tree (simple indent version)
     for folder in shown:
         depth = len(folder.parts)
         indent = "    " * (depth - 1) + "├── "
@@ -458,7 +534,12 @@ def layout_tree_text(
     if len(sorted_folders) > max_folders:
         lines.append(f"    … and {len(sorted_folders) - max_folders} more folders")
     lines.append("")
-    lines.append(f"Pattern: {preset.example}")
+    if len(ids) == 1:
+        lines.append(f"Pattern: {get_layout(ids[0]).example}")
+    else:
+        lines.append("Combined layouts (folders nested, duplicate names skipped):")
+        for lid in ids:
+            lines.append(f"  • {get_layout(lid).name}: {get_layout(lid).example}")
     return "\n".join(lines)
 
 

@@ -1,10 +1,11 @@
 """Scan folders and drives for files. Runs only on your computer.
 
 Tuned for large (hundreds of GB / 1TB+) drives:
+- writes metadata to SQLite instead of only a giant Python list
 - stays on one filesystem by default (won't follow other mounts)
 - streams hashes in chunks (never loads a whole huge file into RAM)
-- reports size + file progress so long scans don't look frozen
-- empty files get an instant fingerprint
+- partial CRC first, full CRC only on collisions
+- caps zip member expansion; reports size + file progress
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from models import (
     category_for,
     category_for_name,
 )
+from scan_store import ScanStore
 
 # Skip these folder names unless the user opts in to junk/system folders
 SKIP_DIR_NAMES = {
@@ -41,10 +43,12 @@ SKIP_DIR_NAMES = {
     "ArchiveOrganiser_Quarantine",
 }
 
-# Larger chunks = fewer syscalls on multi‑GB files (still streaming, low RAM)
 CHUNK_SIZE = 4 * 1024 * 1024  # 4 MB
-# How often to refresh status while hashing one large file
 LARGE_HASH_STATUS_EVERY = 64 * 1024 * 1024  # 64 MB
+# First-pass fingerprint for exact dups (full CRC only when this collides)
+PARTIAL_CRC_BYTES = 8 * 1024 * 1024  # 8 MB
+MAX_ZIP_MEMBERS_PER_ARCHIVE = 5_000
+MAX_ZIP_MEMBERS_TOTAL = 100_000
 
 
 @dataclass
@@ -52,11 +56,13 @@ class ScanOptions:
     """User choices for how deep / wide the scan goes."""
 
     include_junk_system: bool = False
-    scan_zip_contents: bool = True
-    # Always keep our quarantine folder out of scans for safety
+    scan_zip_contents: bool = False
     always_skip_quarantine: bool = True
-    # Do not descend into folders on a different mount/device (safer for huge drives)
     stay_on_device: bool = True
+    # Write metadata to SQLite (recommended for large drives)
+    use_sqlite: bool = True
+    max_zip_members_per_archive: int = MAX_ZIP_MEMBERS_PER_ARCHIVE
+    max_zip_members_total: int = MAX_ZIP_MEMBERS_TOTAL
 
 
 def should_skip_dir(name: str, options: Optional[ScanOptions] = None) -> bool:
@@ -65,7 +71,6 @@ def should_skip_dir(name: str, options: Optional[ScanOptions] = None) -> bool:
     if opts.always_skip_quarantine and name == "ArchiveOrganiser_Quarantine":
         return True
     if opts.include_junk_system:
-        # Still skip our quarantine; optionally still skip .git for speed
         return False
     return name in SKIP_DIR_NAMES or name.startswith(".")
 
@@ -86,13 +91,23 @@ def file_hash(path: Path, progress_cb: Optional[Callable[[int], None]] = None) -
     return hasher.hexdigest()
 
 
-def file_crc32(path: Path, progress_cb: Optional[Callable[[int], None]] = None) -> int:
-    """CRC32 of a disk file (streaming — same format zip stores)."""
+def file_crc32(
+    path: Path,
+    progress_cb: Optional[Callable[[int], None]] = None,
+    byte_limit: Optional[int] = None,
+) -> int:
+    """CRC32 of a disk file (streaming). Optional byte_limit for partial fingerprints."""
     crc = 0
     done = 0
     with path.open("rb") as handle:
         while True:
-            chunk = handle.read(CHUNK_SIZE)
+            to_read = CHUNK_SIZE
+            if byte_limit is not None:
+                remaining = byte_limit - done
+                if remaining <= 0:
+                    break
+                to_read = min(CHUNK_SIZE, remaining)
+            chunk = handle.read(to_read)
             if not chunk:
                 break
             crc = zlib.crc32(chunk, crc)
@@ -118,18 +133,18 @@ def archive_member_hash(container: Path, member: str) -> str:
 def content_hash(
     info: FileInfo,
     progress_cb: Optional[Callable[[int], None]] = None,
+    partial: bool = False,
 ) -> str:
     """
     Fingerprint for exact-duplicate matching.
 
-    Zip members: use CRC32 from the zip directory (instant — no byte read).
-    Disk files: CRC32 of file bytes (one streaming read; matches zip CRC).
-    Empty disk files: instant (no read).
+    Zip members: CRC32 from the zip directory (instant).
+    Disk: CRC32 streaming; empty files instant.
+    partial=True uses only the first PARTIAL_CRC_BYTES (then full pass on collisions).
     """
     if info.archive_container and info.archive_member:
         if info.zip_crc is not None:
             return f"crc32:{info.size}:{info.zip_crc:08x}"
-        # Fallback: look up CRC from the zip without extracting full SHA
         try:
             with zipfile.ZipFile(info.archive_container, "r") as zf:
                 crc = zf.getinfo(info.archive_member).CRC & 0xFFFFFFFF
@@ -138,18 +153,44 @@ def content_hash(
             return f"sha256:{archive_member_hash(info.archive_container, info.archive_member)}"
     if info.size == 0:
         return "crc32:0:00000000"
+    if partial and info.size > PARTIAL_CRC_BYTES:
+        crc = file_crc32(info.path, progress_cb=progress_cb, byte_limit=PARTIAL_CRC_BYTES)
+        return f"pcrc32:{info.size}:{crc:08x}"
     crc = file_crc32(info.path, progress_cb=progress_cb)
     return f"crc32:{info.size}:{crc:08x}"
+
+
+def _add_file(
+    result: ScanResult,
+    info: FileInfo,
+    store: Optional[ScanStore],
+) -> None:
+    if store is not None:
+        store.insert_file(info)
+    else:
+        result.files.append(info)
+    result.file_count += 1
+    result.total_bytes += info.size
 
 
 def _list_zip_members(
     zip_path: Path,
     root_path: Path,
     result: ScanResult,
+    opts: ScanOptions,
+    store: Optional[ScanStore],
     status_cb: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
 ) -> None:
-    """Add one FileInfo per file stored inside a .zip (folders are skipped)."""
+    """Add FileInfo rows for files inside a .zip, respecting caps."""
+    if result.archive_members >= opts.max_zip_members_total:
+        result.zip_members_capped += 1
+        if status_cb:
+            status_cb(
+                f"Zip member cap reached ({opts.max_zip_members_total:,}); "
+                f"skipping further zip contents"
+            )
+        return
     try:
         if not zipfile.is_zipfile(zip_path):
             return
@@ -160,6 +201,17 @@ def _list_zip_members(
                     return
                 if info.is_dir():
                     continue
+                if members_here >= opts.max_zip_members_per_archive:
+                    result.zip_members_capped += 1
+                    if status_cb:
+                        status_cb(
+                            f"Capped {zip_path.name} at "
+                            f"{opts.max_zip_members_per_archive:,} members"
+                        )
+                    break
+                if result.archive_members >= opts.max_zip_members_total:
+                    result.zip_members_capped += 1
+                    break
                 member = info.filename
                 try:
                     date_tuple = info.date_time
@@ -178,8 +230,7 @@ def _list_zip_members(
                         archive_member=member,
                         zip_crc=info.CRC & 0xFFFFFFFF,
                     )
-                    result.files.append(entry)
-                    result.total_bytes += info.file_size
+                    _add_file(result, entry, store)
                     result.archive_members += 1
                     members_here += 1
                     if status_cb and members_here % 400 == 0:
@@ -188,7 +239,7 @@ def _list_zip_members(
                             f"{members_here} entries "
                             f"({result.archive_members} zip files total)"
                         )
-                except Exception as exc:  # noqa: BLE001 — keep scanning other members
+                except Exception as exc:  # noqa: BLE001
                     result.errors.append(f"Zip member {zip_path} → {member}: {exc}")
                     result.skipped += 1
         if status_cb and members_here:
@@ -207,13 +258,13 @@ def scan_paths(
     """
     Walk every chosen folder/drive and collect file info.
     Does not move or delete anything.
-
-    options.include_junk_system — also enter Trash, System Volume Information, dot-folders, etc.
-    options.scan_zip_contents — also list files stored inside .zip archives.
-    options.stay_on_device — do not follow folders on another mount (default True).
     """
     opts = options or ScanOptions()
     result = ScanResult()
+    store: Optional[ScanStore] = None
+    if opts.use_sqlite:
+        store = ScanStore()
+        result.store = store
     timer = ElapsedTimer()
     last_status_at = 0.0
 
@@ -246,6 +297,8 @@ def scan_paths(
         for dirpath, dirnames, filenames in os.walk(root_path, followlinks=False):
             if should_cancel and should_cancel():
                 result.errors.append("Scan cancelled by user.")
+                if store:
+                    store.flush()
                 result.duration_seconds = timer.seconds()
                 return result
 
@@ -265,7 +318,6 @@ def scan_paths(
                 for part in current.relative_to(root_path).parts
             ) if current != root_path else False
 
-            # Prune skipped names, then drop other-device children before descending
             kept_dirs: list[str] = []
             for d in dirnames:
                 if should_skip_dir(d, opts):
@@ -285,6 +337,8 @@ def scan_paths(
             for filename in filenames:
                 if should_cancel and should_cancel():
                     result.errors.append("Scan cancelled by user.")
+                    if store:
+                        store.flush()
                     result.duration_seconds = timer.seconds()
                     return result
 
@@ -307,8 +361,7 @@ def scan_paths(
                             opts.include_junk_system and filename.startswith(".")
                         ),
                     )
-                    result.files.append(info)
-                    result.total_bytes += info.size
+                    _add_file(result, info, store)
 
                     if (
                         opts.scan_zip_contents
@@ -318,11 +371,13 @@ def scan_paths(
                             full,
                             root_path,
                             result,
+                            opts,
+                            store,
                             status_cb=maybe_status,
                             should_cancel=should_cancel,
                         )
                         maybe_status(
-                            f"Scanning… {len(result.files)} files · "
+                            f"Scanning… {result.file_count} files · "
                             f"{format_bytes(result.total_bytes)} "
                             f"({result.archive_members} in zips)"
                         )
@@ -333,9 +388,9 @@ def scan_paths(
                     ):
                         pass
 
-                    if len(result.files) % 250 == 0:
+                    if result.file_count % 250 == 0:
                         maybe_status(
-                            f"Scanning… {len(result.files)} files · "
+                            f"Scanning… {result.file_count} files · "
                             f"{format_bytes(result.total_bytes)}"
                             + (
                                 f" ({result.archive_members} in zips)"
@@ -348,10 +403,15 @@ def scan_paths(
                     result.skipped += 1
 
         maybe_status(
-            f"Finished folder: {root_path} — {len(result.files)} files · "
+            f"Finished folder: {root_path} — {result.file_count} files · "
             f"{format_bytes(result.total_bytes)} so far",
             force=True,
         )
+
+    if store:
+        store.flush()
+        result.file_count = store.count()
+        result.total_bytes = store.total_bytes()
 
     result.duration_seconds = timer.seconds()
     if status_cb:
@@ -361,10 +421,15 @@ def scan_paths(
             if result.cross_device_skipped
             else ""
         )
+        capped = (
+            f", zip caps hit {result.zip_members_capped} time(s)"
+            if result.zip_members_capped
+            else ""
+        )
         status_cb(
             timer.stamp(
-                f"Scan complete: {len(result.files)} files · "
-                f"{format_bytes(result.total_bytes)}{extra}{cross} "
+                f"Scan complete: {result.file_count} files · "
+                f"{format_bytes(result.total_bytes)}{extra}{cross}{capped} "
                 f"in {format_duration(result.duration_seconds)}"
             )
         )
@@ -375,47 +440,86 @@ def add_hashes(
     files: list[FileInfo],
     status_cb: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
+    store: Optional[ScanStore] = None,
+    use_partial: bool = True,
 ) -> None:
     """
-    Fill in hash_value for each file.
-    Zip members use stored CRC (instant). Disk files are CRC32-read once (streamed).
-    Large files report byte progress so 1TB drives don't look frozen.
+    Fill hash_value for each file.
+
+    When use_partial is True (default for disk files larger than PARTIAL_CRC_BYTES):
+    1) compute partial CRC for all candidates
+    2) only run full CRC on groups that still collide on (size + partial)
+    Zip members always use the stored full CRC (instant).
     """
-    # Process instant zip CRCs first so progress jumps quickly on huge zip libraries
     ordered = sorted(files, key=lambda f: (0 if f.is_inside_archive else 1, str(f.path)))
     total = len(ordered)
     step = 500 if total >= 20_000 else 200 if total >= 5000 else 50
     last_large_status = 0.0
 
+    def on_bytes_factory(index: int, info: FileInfo) -> Callable[[int], None]:
+        def on_bytes(done: int) -> None:
+            nonlocal last_large_status
+            if not status_cb or info.size < LARGE_HASH_STATUS_EVERY:
+                return
+            now = time.monotonic()
+            if done < info.size and (now - last_large_status) < 1.0:
+                return
+            last_large_status = now
+            status_cb(
+                f"Reading large file {index}/{total}: {info.name[:36]} · "
+                f"{format_bytes(done)}/{format_bytes(info.size)}"
+            )
+
+        return on_bytes
+
+    def apply_hash(info: FileInfo, value: str) -> None:
+        info.hash_value = value
+        sid = info.store_id
+        if store is not None and sid is not None:
+            store.update_hash(sid, value)
+            if not info.is_inside_archive:
+                store.store_hash_cache(str(info.path), info.size, info.modified, value)
+
+    # --- Pass 1: cache / zip / partial ---
+    partial_map: dict[str, list[FileInfo]] = {}
     for index, info in enumerate(ordered, start=1):
         if should_cancel and should_cancel():
             if status_cb:
                 status_cb("Hashing cancelled.")
+            if store:
+                store.commit()
             return
         if info.hash_value:
             continue
+
+        # Hash cache (disk files only)
+        if store is not None and not info.is_inside_archive:
+            cached = store.cached_hash(str(info.path), info.size, info.modified)
+            if cached:
+                apply_hash(info, cached)
+                continue
+
         try:
             if status_cb and (index == 1 or index % step == 0 or index == total):
-                kind = "zip-crc" if info.is_inside_archive else "disk-crc"
+                kind = "zip-crc" if info.is_inside_archive else "partial-crc" if use_partial else "disk-crc"
                 status_cb(
                     f"Fingerprinting files: {index}/{total} ({kind}) · "
                     f"{format_bytes(info.size)} · {info.name[:40]}"
                 )
 
-            def on_bytes(done: int, _info: FileInfo = info) -> None:
-                nonlocal last_large_status
-                if not status_cb or _info.size < LARGE_HASH_STATUS_EVERY:
-                    return
-                now = time.monotonic()
-                if done < _info.size and (now - last_large_status) < 1.0:
-                    return
-                last_large_status = now
-                status_cb(
-                    f"Reading large file {index}/{total}: {_info.name[:36]} · "
-                    f"{format_bytes(done)}/{format_bytes(_info.size)}"
+            need_partial = (
+                use_partial
+                and not info.is_inside_archive
+                and info.size > PARTIAL_CRC_BYTES
+            )
+            if need_partial:
+                ph = content_hash(info, progress_cb=on_bytes_factory(index, info), partial=True)
+                partial_map.setdefault(ph, []).append(info)
+            else:
+                apply_hash(
+                    info,
+                    content_hash(info, progress_cb=on_bytes_factory(index, info), partial=False),
                 )
-
-            info.hash_value = content_hash(info, progress_cb=on_bytes)
         except OSError as exc:
             info.hash_value = None
             if status_cb:
@@ -424,3 +528,38 @@ def add_hashes(
             info.hash_value = None
             if status_cb:
                 status_cb(f"Could not hash zip member {info.name}: {exc}")
+
+    # --- Pass 2: full CRC only where partial fingerprints collided ---
+    to_full: list[FileInfo] = []
+    for partial_key, group in partial_map.items():
+        if len(group) >= 2:
+            to_full.extend(group)
+        elif len(group) == 1:
+            # Unique among same-size candidates — no full read needed
+            apply_hash(group[0], partial_key)
+
+    full_total = len(to_full)
+    for index, info in enumerate(to_full, start=1):
+        if should_cancel and should_cancel():
+            if status_cb:
+                status_cb("Hashing cancelled.")
+            if store:
+                store.commit()
+            return
+        try:
+            if status_cb and (index == 1 or index % max(1, step // 2) == 0 or index == full_total):
+                status_cb(
+                    f"Full fingerprint (collision check): {index}/{full_total} · "
+                    f"{info.name[:40]}"
+                )
+            apply_hash(
+                info,
+                content_hash(info, progress_cb=on_bytes_factory(index, info), partial=False),
+            )
+        except OSError as exc:
+            info.hash_value = None
+            if status_cb:
+                status_cb(f"Could not hash {info.name}: {exc}")
+
+    if store:
+        store.commit()

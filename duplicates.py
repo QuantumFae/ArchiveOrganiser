@@ -98,13 +98,14 @@ def find_duplicate_matches(
     options: Optional[DuplicateSearchOptions] = None,
     status_cb: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
+    store=None,
 ) -> DuplicateReport:
     """
     Find exact duplicates and/or similar photos / documents.
 
     Similar modes use bucketing (not full pairwise) so large drives finish.
-    Zip members are included in exact search, but skipped for similar
-    (listing tens of thousands of zip docs made searches take 30+ minutes).
+    Zip members are included in exact search, but skipped for similar.
+    When ``store`` is set, exact search loads only same-size candidates from SQLite.
     """
     opts = options or DuplicateSearchOptions()
     timer = ElapsedTimer()
@@ -116,7 +117,9 @@ def find_duplicate_matches(
 
     if opts.exact:
         status("Looking for exact duplicates…")
-        exact_report = _find_exact(files, status_cb=status, should_cancel=should_cancel)
+        exact_report = _find_exact(
+            files, status_cb=status, should_cancel=should_cancel, store=store
+        )
         report.groups.extend(exact_report.groups)
         status(f"Exact duplicates: {len(exact_report.groups)} groups")
 
@@ -125,10 +128,16 @@ def find_duplicate_matches(
         report.notes.append("Cancelled early.")
         return report
 
+    # Similar modes need a concrete file list (load from store if needed)
+    work_files = files
+    if (opts.similar_photos or opts.similar_documents) and not work_files and store is not None:
+        status("Loading file list for similar search…")
+        work_files = store.load_all_files()
+
     if opts.similar_photos:
         status("Comparing photos by name and look (fast buckets)…")
         photo_groups, photo_notes = _find_similar_photos(
-            files, status_cb=status, should_cancel=should_cancel
+            work_files, status_cb=status, should_cancel=should_cancel
         )
         report.groups.extend(photo_groups)
         report.notes.extend(photo_notes)
@@ -142,13 +151,12 @@ def find_duplicate_matches(
     if opts.similar_documents:
         status("Comparing documents by name and content (fast buckets)…")
         doc_groups, doc_notes = _find_similar_documents(
-            files, status_cb=status, should_cancel=should_cancel
+            work_files, status_cb=status, should_cancel=should_cancel
         )
         report.groups.extend(doc_groups)
         report.notes.extend(doc_notes)
         status(f"Similar documents: {len(doc_groups)} groups")
 
-    # Drop similar groups that are fully covered by an exact group
     report.groups = _dedupe_against_exact(report.groups)
     report.groups.sort(key=lambda g: (g.kind != "exact", -g.wasted_bytes))
     report.duration_seconds = timer.seconds()
@@ -182,21 +190,37 @@ def _find_exact(
     files: list[FileInfo],
     status_cb: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
+    store=None,
 ) -> DuplicateReport:
     report = DuplicateReport()
-    by_size: dict[int, list[FileInfo]] = defaultdict(list)
-    for info in files:
-        by_size[info.size].append(info)
-
     candidates: list[FileInfo] = []
-    for group in by_size.values():
-        if len(group) > 1:
-            candidates.extend(group)
+
+    if store is not None:
+        size_groups = list(store.iter_same_size_groups())
+        if status_cb:
+            status_cb(f"Same-size buckets to check: {len(size_groups)}")
+        for _size, ids in size_groups:
+            if should_cancel and should_cancel():
+                return report
+            candidates.extend(store.load_files_by_ids(ids))
+    else:
+        by_size: dict[int, list[FileInfo]] = defaultdict(list)
+        for info in files:
+            by_size[info.size].append(info)
+        for group in by_size.values():
+            if len(group) > 1:
+                candidates.extend(group)
 
     if status_cb:
         status_cb(f"Possible exact duplicates to hash: {len(candidates)} files")
 
-    add_hashes(candidates, status_cb=status_cb, should_cancel=should_cancel)
+    add_hashes(
+        candidates,
+        status_cb=status_cb,
+        should_cancel=should_cancel,
+        store=store,
+        use_partial=True,
+    )
 
     by_hash: dict[str, list[FileInfo]] = defaultdict(list)
     for info in candidates:
@@ -206,6 +230,8 @@ def _find_exact(
     for hash_value, group_files in by_hash.items():
         if len(group_files) < 2:
             continue
+        # Partial-only keys must not form groups (those were unique → already filtered)
+        # Full CRC groups and zip CRC groups are real matches.
         ordered = sorted(group_files, key=lambda f: (f.modified, f.display_path))
         report.groups.append(
             DuplicateGroup(

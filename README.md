@@ -53,9 +53,9 @@ Use a **test folder** with a few copied files first. Learn the buttons before sc
    - Click **Select this folder** when you are inside the right place
 2. Optionally tick:
    - **Include junk / system folders** (Trash, System Volume Information, dot-folders, …)
-   - **Scan inside .zip archives** (lists files stored in zips for duplicate checks)
+   - **Scan inside .zip archives** (off by default for huge drives; listings are capped)
 3. On Linux, external drives often appear under Places as **Drive: …** (from `/media`, `/mnt`, `/run/media`).
-4. Click **Scan now** and wait for the status bar to finish.
+4. Click **Scan now** and wait for the status bar to finish. Large libraries use an **SQLite index** so RAM stays under control.
 
 ### 3. Overview tab
 - Check counts by category and total size.
@@ -64,10 +64,10 @@ Use a **test folder** with a few copied files first. Learn the buttons before sc
 - Click **Find duplicates**.
 
 ### 4. Duplicates tab
-- Left: **every duplicate group** (Exact / Photo≈ / Doc≈). Drag the sash to resize panes.
+- Left: **duplicate groups** (Exact / Photo≈ / Doc≈). Huge result sets load in pages (**Load more**).
 - Click a group → **side-by-side cards** on the right for each copy.
-- Photos match by **similar name** and/or **similar look**; documents by **name** and/or **text content**.
-- Files inside zips can be compared; quarantine applies to real disk files only.
+- Every file gets a **best-effort preview** (image/page/frame/waveform/text) or a **type card + binary sample**.
+- Prefer **Quarantine selected**. Permanent delete needs confirmations.
 
 Quarantined files go to:
 

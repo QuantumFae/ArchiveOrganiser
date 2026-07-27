@@ -34,7 +34,7 @@ class FilePreview:
     """What the GUI shows for one file in a duplicate group."""
 
     path: Path
-    kind: str  # "image", "text"
+    kind: str  # "image", "text", "composite"
     info_text: str
     image: Optional[object] = None  # PIL Image
     text_content: str = ""
@@ -81,6 +81,7 @@ def load_preview_for_info(file_info, role: str) -> FilePreview:
         try:
             from similarity import _extract_text, _open_bytes, _pil_from_info, is_document, is_photo
 
+            # Photos / images
             if is_photo(file_info):
                 img = _pil_from_info(file_info)
                 if img is not None:
@@ -90,6 +91,28 @@ def load_preview_for_info(file_info, role: str) -> FilePreview:
                         info_text=info_text,
                         image=_as_thumb(img),
                     )
+            # PDF page from zip bytes
+            if file_info.suffix == ".pdf":
+                try:
+                    import fitz
+                    from PIL import Image
+
+                    data = _open_bytes(file_info, max_bytes=32 * 1024 * 1024)
+                    doc = fitz.open(stream=data, filetype="pdf")
+                    try:
+                        if doc.page_count >= 1:
+                            pix = doc[0].get_pixmap(matrix=fitz.Matrix(1.2, 1.2), alpha=False)
+                            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                            return FilePreview(
+                                path=file_info.path,
+                                kind="image",
+                                info_text=info_text,
+                                image=_as_thumb(img),
+                            )
+                    finally:
+                        doc.close()
+                except Exception:
+                    pass
             if is_document(file_info) or file_info.suffix in TEXT_EXTS:
                 text = _extract_text(file_info)
                 if text.strip():
@@ -240,11 +263,9 @@ def _fallback_preview(
         + "\n".join(lines)
     )
     card = _type_card(path, category, note=note, extra_lines=lines[:4])
-    # Prefer text hex so content is scrollable; image card still available via kind image
-    # Use text so user can read bytes in the Preview pane
     return FilePreview(
         path=path,
-        kind="text",
+        kind="composite",
         info_text=info_text,
         text_content=hex_text,
         image=card,
@@ -427,6 +448,13 @@ def load_preview(path: Path, size: int, modified: float, category: str, role: st
     # --- Photos / common images ---
     if ext in IMAGE_EXTS and ext not in RAW_EXTS:
         try:
+            if ext in {".heic", ".heif"}:
+                try:
+                    from pillow_heif import register_heif_opener
+
+                    register_heif_opener()
+                except Exception:
+                    pass
             return FilePreview(
                 path=path, kind="image", info_text=info, image=_preview_pillow_image(path)
             )
