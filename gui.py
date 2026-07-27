@@ -77,6 +77,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._busy = False
         self._selected_group_index: Optional[int] = None
         self._compare_check_vars: list[tk.BooleanVar] = []
+        self._compare_checkboxes: list = []
         self._compare_file_infos: list[FileInfo] = []
         self._compare_image_refs: list[object] = []  # keep CTkImage alive
         self._compare_pil_images: list[object] = []
@@ -409,6 +410,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         for child in self.compare_frame.winfo_children():
             child.destroy()
         self._compare_check_vars.clear()
+        self._compare_checkboxes.clear()
         self._compare_file_infos.clear()
         self._compare_image_refs.clear()
         self._compare_pil_images.clear()
@@ -822,7 +824,10 @@ class ArchiveOrganiserApp(ctk.CTk):
         if info.is_inside_archive:
             select_text = "Inside zip (can't quarantine alone)"
             check_var.set(False)
-        ctk.CTkCheckBox(actions, text=select_text, variable=check_var).pack(side="left")
+        checkbox = ctk.CTkCheckBox(actions, text=select_text, variable=check_var)
+        checkbox.pack(side="left")
+        if info.is_inside_archive:
+            checkbox.configure(state="disabled")
         open_target = info.archive_container if info.is_inside_archive else info.path
         ctk.CTkButton(
             actions,
@@ -833,6 +838,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         ).pack(side="right")
 
         self._compare_check_vars.append(check_var)
+        self._compare_checkboxes.append(checkbox)
         self._compare_file_infos.append(info)
         return col
 
@@ -881,18 +887,64 @@ class ArchiveOrganiserApp(ctk.CTk):
 
     def select_extras_in_group(self) -> None:
         """Select every extra copy (not KEEP); skip zip members."""
-        for i, (var, info) in enumerate(
-            zip(self._compare_check_vars, self._compare_file_infos)
+        if not self._compare_check_vars:
+            self._set_status("Open a duplicate group first, then use Select extras only.")
+            return
+        selected = 0
+        for i, (var, info, checkbox) in enumerate(
+            zip(
+                self._compare_check_vars,
+                self._compare_file_infos,
+                self._compare_checkboxes,
+            )
         ):
-            var.set(i > 0 and not info.is_inside_archive)
+            want = i > 0 and not info.is_inside_archive
+            var.set(want)
+            # CTkCheckBox often ignores BooleanVar.set() alone — force the widget
+            try:
+                if want:
+                    checkbox.select()
+                else:
+                    checkbox.deselect()
+            except Exception:
+                pass
+            if want:
+                selected += 1
+        self._set_status(f"Selected {selected} extra file(s) in this group.")
 
     def select_all_in_group(self) -> None:
-        for var in self._compare_check_vars:
+        if not self._compare_check_vars:
+            self._set_status("Open a duplicate group first.")
+            return
+        for var, info, checkbox in zip(
+            self._compare_check_vars,
+            self._compare_file_infos,
+            self._compare_checkboxes,
+        ):
+            if info.is_inside_archive:
+                var.set(False)
+                try:
+                    checkbox.deselect()
+                except Exception:
+                    pass
+                continue
             var.set(True)
+            try:
+                checkbox.select()
+            except Exception:
+                pass
+        self._set_status("Selected all removable files in this group.")
 
     def clear_compare_selection(self) -> None:
-        for var in self._compare_check_vars:
+        if not self._compare_check_vars:
+            return
+        for var, checkbox in zip(self._compare_check_vars, self._compare_checkboxes):
             var.set(False)
+            try:
+                checkbox.deselect()
+            except Exception:
+                pass
+        self._set_status("Cleared selection in this group.")
 
     def _selected_compare_files(self) -> list[FileInfo]:
         chosen: list[FileInfo] = []
