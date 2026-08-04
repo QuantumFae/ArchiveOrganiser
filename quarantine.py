@@ -195,7 +195,6 @@ def permanently_delete(
     if total == 0:
         return ["Nothing to delete."]
 
-    log: list[str] = []
     deleted = 0
     skipped = 0
     errors = 0
@@ -211,13 +210,17 @@ def permanently_delete(
     # Small batches / slow USB filesystems: sequential (less overhead, less thrashing)
     worker_n = _delete_workers_for_paths(paths, max(1, workers))
     use_pool = total >= 20 and worker_n > 1
+    # Keep (index, line) so parallel completion can be re-sorted into path order
+    indexed: list[tuple[int, str]] = []
+    cancelled_note = ""
+
     if not use_pool:
-        for path in paths:
+        for index, path in enumerate(paths):
             if should_cancel and should_cancel():
-                log.append("[cancelled] Delete stopped early.")
+                cancelled_note = "[cancelled] Delete stopped early."
                 break
             line = _unlink_one(path)
-            log.append(line)
+            indexed.append((index, line))
             if line.startswith("[deleted]"):
                 deleted += 1
             elif line.startswith("[skip]"):
@@ -229,16 +232,17 @@ def permanently_delete(
     else:
         worker_n = max(1, min(worker_n, 8, total))
         with ThreadPoolExecutor(max_workers=worker_n) as pool:
-            futures = []
-            for path in paths:
+            futures: dict = {}
+            for index, path in enumerate(paths):
                 if should_cancel and should_cancel():
-                    log.append("[cancelled] Delete stopped early.")
+                    cancelled_note = "[cancelled] Delete stopped early."
                     break
-                futures.append(pool.submit(_unlink_one, path))
+                futures[pool.submit(_unlink_one, path)] = index
             for fut in as_completed(futures):
+                index = futures[fut]
                 line = fut.result()
                 with lock:
-                    log.append(line)
+                    indexed.append((index, line))
                     if line.startswith("[deleted]"):
                         deleted += 1
                     elif line.startswith("[skip]"):
@@ -248,6 +252,10 @@ def permanently_delete(
                     done += 1
                     note_progress()
 
+    indexed.sort(key=lambda item: item[0])
+    log = [line for _index, line in indexed]
+    if cancelled_note:
+        log.append(cancelled_note)
     log.append(
         f"Summary: deleted={deleted} skipped={skipped} errors={errors} of {total}"
     )
