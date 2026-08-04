@@ -53,6 +53,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "include_junk": False,
     "scan_zips": False,
     "extract_zips": False,
+    "delete_zip_after_extract": False,
     "delete_zip_if_low_space": False,
     "copy_instead_of_move": True,
     "dry_run": True,

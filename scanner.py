@@ -73,7 +73,10 @@ class ScanOptions:
     scan_zip_contents: bool = False
     # Physically extract .zip beside the archive (uses disk; keeps the .zip by default)
     extract_zips: bool = False
+    # After a successful extract, always delete the original .zip (then scan *_unzipped/)
+    delete_zip_after_extract: bool = False
     # If extract is on and free space looks tight: after a successful extract, delete the .zip
+    # (ignored when delete_zip_after_extract is on)
     delete_zip_if_low_space: bool = False
     always_skip_quarantine: bool = True
     stay_on_device: bool = True
@@ -189,6 +192,27 @@ def _add_file(
         result.files.append(info)
     result.file_count += 1
     result.total_bytes += info.size
+
+
+def _remove_file_from_result(
+    result: ScanResult,
+    path: Path,
+    store: Optional[ScanStore],
+    size: int = 0,
+) -> None:
+    """Drop a path from the in-progress scan (e.g. .zip deleted after extract)."""
+    path_str = str(path)
+    if store is not None:
+        try:
+            store.flush()
+            store.remove_paths([path_str])
+        except Exception:
+            pass
+    if result.files:
+        result.files = [f for f in result.files if str(f.path) != path_str]
+    result.file_count = max(0, result.file_count - 1)
+    if size > 0:
+        result.total_bytes = max(0, result.total_bytes - size)
 
 
 def _list_zip_members(
@@ -364,14 +388,21 @@ def _write_unzipped_note(
     *,
     zip_deleted: bool = False,
     zip_path_display: Optional[str] = None,
+    deleted_for_space: bool = False,
 ) -> None:
     """Leave a short note so the user knows why this folder appeared."""
     when = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if zip_deleted:
-        zip_line = (
-            "The original .zip file was deleted after a successful extract "
-            "to free disk space (you turned on that option).\n"
-        )
+        if deleted_for_space:
+            zip_line = (
+                "The original .zip file was deleted after a successful extract "
+                "to free disk space (you turned on that option).\n"
+            )
+        else:
+            zip_line = (
+                "The original .zip file was deleted after a successful extract "
+                "(you turned on “delete .zip after unzip”).\n"
+            )
     else:
         zip_line = "The original .zip file was kept (not deleted).\n"
     source_line = zip_path_display
@@ -437,14 +468,16 @@ def extract_zip_beside(
     status_cb: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
     delete_zip_if_low_space: bool = False,
+    delete_zip_after_extract: bool = False,
 ) -> tuple[Optional[Path], str]:
     """
     Extract a .zip into a new sibling folder named like Vacation_unzipped/.
 
     Returns (folder_path, message). folder_path is None on skip/failure.
     Never wipes an existing non-empty folder.
-    Never deletes the original zip unless delete_zip_if_low_space is on,
-    free space looked tight before extract, and extract fully succeeded.
+    Never deletes the original zip unless extract fully succeeded and either
+    delete_zip_after_extract is on, or delete_zip_if_low_space is on and
+    free space looked tight before extract.
     """
     existing = find_existing_unzipped_folder(zip_path)
     if existing is not None:
@@ -461,21 +494,18 @@ def extract_zip_beside(
             "(existing folders left untouched)"
         )
 
-    # Estimate space before we start writing (used only for the optional delete-after-success)
+    # Estimate space before we start writing (used for optional low-space delete)
     space_was_low = False
     uncompressed = estimated_zip_uncompressed_bytes(zip_path)
     if uncompressed is not None:
         space_was_low = disk_space_is_low_for_extract(zip_path.parent, uncompressed)
         if space_was_low and status_cb:
+            will_delete = delete_zip_after_extract or delete_zip_if_low_space
             status_cb(
                 f"Low free space for {zip_path.name} "
                 f"(need about {format_bytes(needed_extract_bytes(uncompressed))}); "
                 "will extract first"
-                + (
-                    ", then delete the zip if extract succeeds"
-                    if delete_zip_if_low_space
-                    else ""
-                )
+                + (", then delete the zip if extract succeeds" if will_delete else "")
             )
 
     try:
@@ -532,13 +562,19 @@ def extract_zip_beside(
     except OSError:
         zip_path_display = str(zip_path)
 
-    if delete_zip_if_low_space and space_was_low:
+    should_delete = delete_zip_after_extract or (
+        delete_zip_if_low_space and space_was_low
+    )
+    if should_delete:
         try:
             zip_path.unlink()
             zip_deleted = True
-            delete_note = "; deleted zip to free disk space"
+            if delete_zip_after_extract:
+                delete_note = "; deleted zip after successful unzip"
+            else:
+                delete_note = "; deleted zip to free disk space"
         except OSError as exc:
-            delete_note = f"; wanted to delete zip for space but failed: {exc}"
+            delete_note = f"; wanted to delete zip but failed: {exc}"
 
     try:
         _write_unzipped_note(
@@ -546,6 +582,7 @@ def extract_zip_beside(
             zip_path,
             zip_deleted=zip_deleted,
             zip_path_display=zip_path_display,
+            deleted_for_space=bool(zip_deleted and not delete_zip_after_extract),
         )
     except OSError as exc:
         return dest, (
@@ -699,14 +736,19 @@ def scan_paths(
                                 status_cb=maybe_status,
                                 should_cancel=should_cancel,
                                 delete_zip_if_low_space=opts.delete_zip_if_low_space,
+                                delete_zip_after_extract=opts.delete_zip_after_extract,
                             )
                             maybe_status(extract_msg, force=True)
                             if dest_folder is not None:
                                 used_on_disk_extract = True
                                 if extract_msg.startswith("Extracted "):
                                     result.zips_extracted += 1
-                                    if "deleted zip to free disk space" in extract_msg:
+                                    if "deleted zip" in extract_msg:
                                         result.zips_deleted_low_space += 1
+                                        # Zip is gone — drop it from the scan index
+                                        _remove_file_from_result(
+                                            result, full, store, size=info.size
+                                        )
                                 # Visit extracted sibling during this scan
                                 if dest_folder.is_dir() and not should_skip_dir(
                                     dest_folder.name, opts
@@ -794,7 +836,7 @@ def scan_paths(
             else ""
         )
         deleted = (
-            f", deleted {result.zips_deleted_low_space} zip(s) for space"
+            f", deleted {result.zips_deleted_low_space} zip(s) after unzip"
             if result.zips_deleted_low_space
             else ""
         )

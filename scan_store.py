@@ -202,6 +202,28 @@ class ScanStore:
         rows = self.conn.execute("SELECT * FROM files ORDER BY id").fetchall()
         return [self._row_to_info(r) for r in rows]
 
+    def remove_paths(self, paths: Iterable[str]) -> int:
+        """
+        Delete file rows whose path matches any of the given strings.
+        Avoids loading the whole scan into memory after bulk delete/quarantine.
+        Returns how many rows were removed.
+        """
+        self.flush()
+        path_list = [str(p) for p in paths if str(p)]
+        if not path_list:
+            return 0
+        removed = 0
+        for i in range(0, len(path_list), 400):
+            chunk = path_list[i : i + 400]
+            placeholders = ",".join("?" * len(chunk))
+            cur = self.conn.execute(
+                f"DELETE FROM files WHERE path IN ({placeholders})",
+                chunk,
+            )
+            removed += int(cur.rowcount or 0)
+        self.conn.commit()
+        return removed
+
     def load_files_by_ids(self, ids: Iterable[int]) -> list[FileInfo]:
         self.flush()
         id_list = list(ids)
