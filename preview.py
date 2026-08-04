@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from helpers import format_bytes
 from models import ARCHIVE_EXTS, AUDIO_EXTS, DOCUMENT_EXTS, IMAGE_EXTS, VIDEO_EXTS
-from quarantine import format_bytes
 
 TEXT_EXTS = {
     ".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm",

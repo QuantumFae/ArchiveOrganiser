@@ -14,6 +14,7 @@ from typing import Optional
 import customtkinter as ctk
 
 from organiser import OrganisePlan, OrganisePlanItem
+from copyable_text import enable_copyable_text
 
 
 class PlanBrowserWindow(ctk.CTkToplevel):
@@ -79,6 +80,7 @@ class PlanBrowserWindow(ctk.CTkToplevel):
 
         self._fill_sidebar()
         self.refresh_listing()
+        enable_copyable_text(self)
 
     def _rel_from_dest(self, dest: Path) -> Path:
         try:
@@ -153,6 +155,7 @@ class PlanBrowserWindow(ctk.CTkToplevel):
             ctk.CTkLabel(self.main_list, text="(empty folder in this plan)").pack(
                 anchor="w", padx=8, pady=8
             )
+            enable_copyable_text(self.main_list)
             return
         for name, is_dir, item in entries:
             if is_dir:
@@ -179,6 +182,7 @@ class PlanBrowserWindow(ctk.CTkToplevel):
                     font=ctk.CTkFont(size=11),
                     text_color=("gray40", "gray65"),
                 ).pack(side="right", padx=4)
+        enable_copyable_text(self.main_list)
 
     def open_folder(self, path: Path) -> None:
         self.cwd = path

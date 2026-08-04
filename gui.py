@@ -26,7 +26,8 @@ from duplicates import (
     sort_groups_by_file_type,
 )
 from folder_picker import ask_folder
-from helpers import format_duration, open_containing_folder
+from helpers import format_bytes, format_duration, open_containing_folder
+from copyable_text import enable_copyable_text, make_textbox_readonly_copyable
 from models import FileInfo, ScanResult
 from best_practices import build_inventory_text, organisation_advice
 from custom_structure import DEFAULT_CUSTOM_TEMPLATE
@@ -72,7 +73,6 @@ from organiser import (
 from plan_browser import PlanBrowserWindow
 from preview import load_preview_for_info
 from quarantine import (
-    format_bytes,
     latest_quarantine_session,
     move_to_quarantine,
     permanently_delete,
@@ -85,6 +85,10 @@ from scanner import ScanOptions, scan_paths
 APP_TITLE = "Archive Organiser"
 APP_SIZE = "1280x800"
 _PROGRESS_FRACTION_RE = re.compile(r"(?<!\d)(\d+)\s*/\s*(\d+)(?!\d)")
+# Side-by-side paned compare works up to this many files; larger groups use a scrollable grid
+_COMPARE_SIDE_BY_SIDE_MAX = 4
+_COMPARE_GRID_CARD_MIN = 250
+_COMPARE_GRID_THUMB = 220
 
 
 class ArchiveOrganiserApp(ctk.CTk):
@@ -129,6 +133,10 @@ class ArchiveOrganiserApp(ctk.CTk):
         # Remembered sash layout (kept when switching duplicate groups)
         self._compare_layout_v_frac = 0.58
         self._compare_layout_h_fracs: Optional[list[float]] = None
+        self._compare_mode = "paned"  # "paned" (≤4) or "grid" (5+)
+        self._compare_grid_scroll = None
+        self._compare_grid_cards: list = []
+        self._compare_grid_cols = 0
         self._busy_started = 0.0
         self._busy_detail = ""
         self._busy_tick_job: Optional[str] = None
@@ -149,6 +157,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._geometry_save_job: Optional[str] = None
 
         self._build_layout()
+        self._enable_copyable_text()
         self._apply_saved_preferences()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.bind("<Configure>", self._on_window_configure, add="+")
@@ -359,7 +368,7 @@ class ArchiveOrganiserApp(ctk.CTk):
             "Scan progress and a clear report will appear here.\n"
             "While scanning, the status bar and this summary show elapsed time.",
         )
-        self.overview_box.configure(state="disabled")
+        make_textbox_readonly_copyable(self.overview_box)
 
         row = ctk.CTkFrame(tab, fg_color="transparent")
         row.grid(row=1, column=0, sticky="ew", padx=8, pady=8)
@@ -429,11 +438,12 @@ class ArchiveOrganiserApp(ctk.CTk):
         compare_header = ctk.CTkFrame(right, fg_color="transparent")
         compare_header.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 2))
         compare_header.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
+        self.compare_header_label = ctk.CTkLabel(
             compare_header,
-            text="Side-by-side compare  ·  one ↕ sash (Preview/Info) · one ↔ sash (columns) · layout kept between groups",
+            text="Side-by-side compare  ·  groups of 5+ open as a scrollable image grid",
             font=ctk.CTkFont(size=13, weight="bold"),
-        ).grid(row=0, column=0, sticky="w")
+        )
+        self.compare_header_label.grid(row=0, column=0, sticky="w")
         nav = ctk.CTkFrame(compare_header, fg_color="transparent")
         nav.grid(row=0, column=1, sticky="e")
         ctk.CTkButton(
@@ -556,6 +566,10 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._compare_vpaned = None
         self._compare_hpaned_top = None
         self._compare_hpaned_bottom = None
+        self._compare_mode = "paned"
+        self._compare_grid_scroll = None
+        self._compare_grid_cards = []
+        self._compare_grid_cols = 0
 
     def _show_duplicates_empty_state(self) -> None:
         """Friendly placeholders before Find duplicates has been run."""
@@ -678,6 +692,7 @@ class ArchiveOrganiserApp(ctk.CTk):
                 justify="left",
                 text_color=MUTED,
             ).pack(anchor="w", padx=4, pady=4)
+            self._enable_copyable_text(self.group_list)
             return
         self._append_group_page()
         self.show_duplicate_group(0)
@@ -739,8 +754,8 @@ class ArchiveOrganiserApp(ctk.CTk):
             )
             more._is_load_more = True  # type: ignore[attr-defined]
             more.pack(fill="x", padx=1, pady=6)
+        self._enable_copyable_text(self.group_list)
 
-    def _highlight_group_button(self, index: int) -> None:
         for i, btn in enumerate(self._group_buttons):
             # Button i corresponds to group index i only for the first page;
             # after Load more, buttons are sequential from 0..shown-1 matching groups 0..shown-1
@@ -751,7 +766,7 @@ class ArchiveOrganiserApp(ctk.CTk):
                 btn.configure(fg_color=LIST_BTN, text_color=LIST_BTN_TEXT)
 
     def show_duplicate_group(self, index: int) -> None:
-        """Show every file in one duplicate group side by side (fills the pane)."""
+        """Show every file in one duplicate group (side-by-side or scrollable grid)."""
         if not self.dup_report or index < 0 or index >= len(self.dup_report.groups):
             return
         # Ensure the group button exists in the virtualized list
@@ -768,8 +783,43 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._highlight_group_button(index)
 
         count = len(group.files)
+        if count > _COMPARE_SIDE_BY_SIDE_MAX:
+            self._show_compare_grid(group)
+        else:
+            self._show_compare_paned(group)
 
-        # GREEN: one vertical sash across the full width (Preview row ↔ File info row)
+        # Default: restore marks / auto-select extras; focus so ← → work
+        self._restore_marks_to_checkboxes()
+        try:
+            self.focus_set()
+        except Exception:
+            pass
+
+        marked_here = sum(1 for var in self._compare_check_vars if int(var.get()))
+        layout_note = (
+            "scroll grid"
+            if self._compare_mode == "grid"
+            else "side-by-side"
+        )
+        self._set_status(
+            f"Viewing: {group.english_heading().splitlines()[0]} · "
+            f"group {index + 1}/{len(self.dup_report.groups)} · "
+            f"{count} files ({layout_note}) · "
+            f"{marked_here} marked here · {len(self._dup_marked_paths)} marked total · "
+            "← → Prev/Next"
+        )
+        self._refresh_marked_label()
+        self._enable_copyable_text(self.compare_frame)
+
+    def _show_compare_paned(self, group) -> None:
+        """Classic side-by-side layout for small groups (≤4 files)."""
+        self._compare_mode = "paned"
+        count = len(group.files)
+        if hasattr(self, "compare_header_label"):
+            self.compare_header_label.configure(
+                text="Side-by-side compare  ·  drag ↕ Preview/Info  ·  drag ↔ columns  ·  layout kept between groups"
+            )
+
         vpaned = tk.PanedWindow(
             self.compare_frame,
             orient=tk.VERTICAL,
@@ -787,7 +837,6 @@ class ArchiveOrganiserApp(ctk.CTk):
         bottom_host.grid_columnconfigure(0, weight=1)
         bottom_host.grid_rowconfigure(0, weight=1)
 
-        # RED: horizontal sashes in Preview row and File-info row, kept in sync as one line
         h_top = tk.PanedWindow(
             top_host,
             orient=tk.HORIZONTAL,
@@ -828,21 +877,207 @@ class ArchiveOrganiserApp(ctk.CTk):
         self.after(40, self._restore_compare_layout)
         self.after(200, self._restore_compare_layout)
 
-        # Default: restore marks / auto-select extras; focus so ← → work
-        self._restore_marks_to_checkboxes()
-        try:
-            self.focus_set()
-        except Exception:
-            pass
+    def _show_compare_grid(self, group) -> None:
+        """Scrollable card grid so larger similar-file groups stay readable."""
+        self._compare_mode = "grid"
+        count = len(group.files)
+        if hasattr(self, "compare_header_label"):
+            self.compare_header_label.configure(
+                text=(
+                    f"Scrollable grid · {count} files · "
+                    "images stay large — scroll to see every copy"
+                )
+            )
 
-        marked_here = sum(1 for var in self._compare_check_vars if int(var.get()))
-        self._set_status(
-            f"Viewing: {group.english_heading().splitlines()[0]} · "
-            f"group {index + 1}/{len(self.dup_report.groups)} · "
-            f"{marked_here} marked here · {len(self._dup_marked_paths)} marked total · "
-            "← → Prev/Next"
+        tip = ctk.CTkLabel(
+            self.compare_frame,
+            text=(
+                f"{count} files in this group. Scroll to review all images. "
+                "Mark extras with the checkbox on each card."
+            ),
+            anchor="w",
+            font=ctk.CTkFont(size=12),
+            text_color=MUTED,
         )
-        self._refresh_marked_label()
+        tip.pack(fill="x", padx=8, pady=(4, 2))
+
+        scroll = ctk.CTkScrollableFrame(self.compare_frame, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        self._compare_grid_scroll = scroll
+        self._compare_grid_cards = []
+
+        for col, info in enumerate(group.files):
+            role = self._duplicate_role_label(col)
+            is_keep = col == 0
+            card = self._build_compare_grid_card(
+                scroll, info, role, is_keep=is_keep, total_cards=count
+            )
+            self._compare_grid_cards.append(card)
+
+        self.after(40, self._layout_compare_grid)
+        self.after(200, self._layout_compare_grid)
+
+    def _compare_grid_column_count(self) -> int:
+        """How many cards fit across the compare pane at a comfortable width."""
+        try:
+            width = max(int(self.compare_frame.winfo_width()), 400)
+        except Exception:
+            width = 900
+        cols = max(2, width // _COMPARE_GRID_CARD_MIN)
+        return min(4, cols)
+
+    def _layout_compare_grid(self) -> None:
+        """Place grid cards in 2–4 columns based on current pane width."""
+        self._compare_resize_job = None
+        if self._compare_mode != "grid" or not self._compare_grid_cards:
+            return
+        scroll = self._compare_grid_scroll
+        if scroll is None:
+            return
+        cols = self._compare_grid_column_count()
+        self._compare_grid_cols = cols
+        for i in range(8):
+            try:
+                scroll.grid_columnconfigure(i, weight=0, minsize=0)
+            except Exception:
+                pass
+        for c in range(cols):
+            scroll.grid_columnconfigure(c, weight=1, minsize=_COMPARE_GRID_CARD_MIN - 10)
+        for i, card in enumerate(self._compare_grid_cards):
+            r, c = divmod(i, cols)
+            card.grid(row=r, column=c, sticky="nsew", padx=6, pady=6)
+        self._apply_compare_image_sizes()
+
+    def _build_compare_grid_card(
+        self,
+        parent,
+        info: FileInfo,
+        role: str,
+        is_keep: bool = False,
+        total_cards: int = 5,
+    ) -> ctk.CTkFrame:
+        """One comfortable card: mark + image + short details (for large groups)."""
+        card = ctk.CTkFrame(parent)
+        card.grid_columnconfigure(0, weight=1)
+        card.grid_rowconfigure(3, weight=1)
+
+        role_color = PRIMARY if is_keep else WARNING
+        ctk.CTkLabel(
+            card,
+            text=role,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=role_color,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 2))
+
+        mark_row = ctk.CTkFrame(card, fg_color="transparent")
+        mark_row.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 4))
+        check_var = tk.IntVar(value=0)
+        select_text = "Mark for quarantine/delete"
+        if info.is_inside_archive:
+            select_text = "Inside zip (can't quarantine alone)"
+        elif is_keep:
+            select_text = "Keep (not an extra)"
+        checkbox = ctk.CTkCheckBox(
+            mark_row,
+            text=select_text,
+            variable=check_var,
+            checkbox_width=22,
+            checkbox_height=22,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=lambda i=info, v=check_var: self._on_mark_toggle(i, v),
+        )
+        checkbox.pack(side="left", fill="x", expand=True)
+        if info.is_inside_archive:
+            checkbox.configure(state="disabled")
+            check_var.set(0)
+        self._compare_check_vars.append(check_var)
+        self._compare_checkboxes.append(checkbox)
+        self._compare_file_infos.append(info)
+        self._compare_is_keep.append(is_keep)
+
+        ctk.CTkLabel(
+            card,
+            text=f"{info.category}  ·  {info.name}",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            anchor="w",
+        ).grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 2))
+
+        preview_host = ctk.CTkFrame(card, fg_color="transparent")
+        preview_host.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 4))
+        preview_host.grid_columnconfigure(0, weight=1)
+        preview_host.grid_rowconfigure(0, weight=1)
+
+        preview = load_preview_for_info(info, role)
+        show_image = preview.image is not None and preview.kind in ("image", "composite")
+        show_text = bool(preview.text_content or preview.error) and preview.kind in (
+            "text",
+            "composite",
+        )
+
+        if show_image and not show_text:
+            self._compare_pil_images.append(preview.image)
+            max_side = _COMPARE_GRID_THUMB
+            pil = preview.image.copy()
+            pil.thumbnail((max_side, max_side))
+            ctk_image = ctk.CTkImage(light_image=pil, dark_image=pil, size=pil.size)
+            self._compare_image_refs.append(ctk_image)
+            img_label = ctk.CTkLabel(preview_host, text="", image=ctk_image)
+            img_label.grid(row=0, column=0, padx=4, pady=4, sticky="n")
+            self._compare_img_labels.append(img_label)
+        elif show_image and show_text:
+            self._compare_pil_images.append(preview.image)
+            max_side = max(140, _COMPARE_GRID_THUMB // 2)
+            pil = preview.image.copy()
+            pil.thumbnail((max_side, max_side))
+            ctk_image = ctk.CTkImage(light_image=pil, dark_image=pil, size=pil.size)
+            self._compare_image_refs.append(ctk_image)
+            img_label = ctk.CTkLabel(preview_host, text="", image=ctk_image)
+            img_label.grid(row=0, column=0, padx=4, pady=(4, 2), sticky="n")
+            self._compare_img_labels.append(img_label)
+            text_box = ctk.CTkTextbox(preview_host, height=90)
+            text_box.grid(row=1, column=0, padx=2, pady=(0, 2), sticky="ew")
+            text_box.insert("1.0", preview.text_content or preview.error)
+            make_textbox_readonly_copyable(text_box)
+        else:
+            text_box = ctk.CTkTextbox(preview_host, height=120)
+            text_box.grid(row=0, column=0, padx=2, pady=2, sticky="nsew")
+            content = preview.text_content or preview.error or "No preview available"
+            if preview.image is not None:
+                self._compare_pil_images.append(preview.image)
+                pil = preview.image.copy()
+                pil.thumbnail((_COMPARE_GRID_THUMB, _COMPARE_GRID_THUMB))
+                ctk_image = ctk.CTkImage(light_image=pil, dark_image=pil, size=pil.size)
+                self._compare_image_refs.append(ctk_image)
+                img_label = ctk.CTkLabel(preview_host, text="", image=ctk_image)
+                img_label.grid(row=0, column=0, padx=4, pady=(4, 2), sticky="n")
+                self._compare_img_labels.append(img_label)
+                text_box.grid(row=1, column=0, padx=2, pady=(0, 2), sticky="ew")
+            text_box.insert("1.0", content)
+            make_textbox_readonly_copyable(text_box)
+
+        # Compact path + open
+        path_txt = str(info.path)
+        if len(path_txt) > 64:
+            path_txt = "…" + path_txt[-63:]
+        ctk.CTkLabel(
+            card,
+            text=path_txt,
+            font=ctk.CTkFont(size=11),
+            text_color=MUTED,
+            anchor="w",
+        ).grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 2))
+        actions = ctk.CTkFrame(card, fg_color="transparent")
+        actions.grid(row=5, column=0, sticky="ew", padx=8, pady=(2, 8))
+        open_target = info.archive_container if info.is_inside_archive else info.path
+        ctk.CTkButton(
+            actions,
+            text="Open folder",
+            width=110,
+            height=28,
+            command=lambda p=open_target: self._open_folder(p),
+        ).pack(side="right")
+        return card
 
     @staticmethod
     def _duplicate_role_label(index: int) -> str:
@@ -1000,7 +1235,7 @@ class ArchiveOrganiserApp(ctk.CTk):
             text_box = ctk.CTkTextbox(preview_host, height=120)
             text_box.grid(row=1, column=0, padx=4, pady=(0, 4), sticky="nsew")
             text_box.insert("1.0", preview.text_content or preview.error)
-            text_box.configure(state="disabled")
+            make_textbox_readonly_copyable(text_box)
         else:
             text_box = ctk.CTkTextbox(preview_host)
             text_box.grid(row=0, column=0, padx=4, pady=4, sticky="nsew")
@@ -1019,7 +1254,7 @@ class ArchiveOrganiserApp(ctk.CTk):
                 preview_host.grid_rowconfigure(1, weight=1)
                 text_box.grid(row=1, column=0, padx=4, pady=(0, 4), sticky="nsew")
             text_box.insert("1.0", content)
-            text_box.configure(state="disabled")
+            make_textbox_readonly_copyable(text_box)
 
         return col
 
@@ -1396,6 +1631,15 @@ class ArchiveOrganiserApp(ctk.CTk):
 
     def _compare_thumb_side(self, total_cards: int) -> int:
         """Pick a preview size from the current compare pane width."""
+        if self._compare_mode == "grid":
+            # Keep grid thumbs large; width is per-card, not shared across all files
+            try:
+                width = max(self.compare_frame.winfo_width(), 400)
+            except Exception:
+                width = 900
+            cols = max(1, self._compare_grid_cols or self._compare_grid_column_count())
+            per_card = max(_COMPARE_GRID_THUMB, int((width - 24) / cols) - 36)
+            return max(_COMPARE_GRID_THUMB, min(per_card, 420))
         try:
             width = max(self.compare_frame.winfo_width(), 400)
         except Exception:
@@ -1404,6 +1648,14 @@ class ArchiveOrganiserApp(ctk.CTk):
         return max(180, min(per_card, 700))
 
     def _on_compare_resize(self, _event=None) -> None:
+        if self._compare_mode == "grid" and self._compare_grid_cards:
+            if self._compare_resize_job is not None:
+                try:
+                    self.after_cancel(self._compare_resize_job)
+                except Exception:
+                    pass
+            self._compare_resize_job = self.after(120, self._layout_compare_grid)
+            return
         if not self._compare_pil_images or not self._compare_img_labels:
             return
         if self._compare_resize_job is not None:
@@ -1442,21 +1694,17 @@ class ArchiveOrganiserApp(ctk.CTk):
         if not self.dup_report:
             return
 
-        resolved: set[Path] = set()
+        # Match by path strings built once — avoid resolve() on every survivor
+        remove_keys: set[str] = set()
         for path in paths:
-            resolved.add(path)
+            remove_keys.add(str(path))
             try:
-                resolved.add(path.resolve())
+                remove_keys.add(str(path.resolve()))
             except OSError:
                 pass
 
         def still_here(info: FileInfo) -> bool:
-            if info.path in resolved:
-                return False
-            try:
-                return info.path.resolve() not in resolved
-            except OSError:
-                return True
+            return str(info.path) not in remove_keys
 
         remaining_groups: list[DuplicateGroup] = []
         for group in self.dup_report.groups:
@@ -1467,9 +1715,24 @@ class ArchiveOrganiserApp(ctk.CTk):
         self.dup_report.groups = remaining_groups
 
         if self.scan_result:
-            self.scan_result.ensure_files_loaded()
-            self.scan_result.files = [f for f in self.scan_result.files if still_here(f)]
-            self.scan_result.file_count = len(self.scan_result.files)
+            store = getattr(self.scan_result, "store", None)
+            if store is not None:
+                try:
+                    store.remove_paths(remove_keys)
+                    self.scan_result.file_count = store.count()
+                    self.scan_result.total_bytes = store.total_bytes()
+                except Exception:
+                    pass
+                # Keep any already-loaded list in sync without forcing a full reload
+                if self.scan_result.files:
+                    self.scan_result.files = [
+                        f for f in self.scan_result.files if still_here(f)
+                    ]
+            else:
+                self.scan_result.files = [
+                    f for f in self.scan_result.files if still_here(f)
+                ]
+                self.scan_result.file_count = len(self.scan_result.files)
 
         self.dup_summary.configure(
             text=(
@@ -1480,6 +1743,118 @@ class ArchiveOrganiserApp(ctk.CTk):
             )
         )
         self._populate_group_list()
+
+    def _start_bulk_dup_cleanup(self, files: list[FileInfo], action: str) -> None:
+        """
+        Run quarantine or permanent delete off the UI thread with progress.
+        action: "quarantine" or "delete"
+        """
+        if self._busy:
+            messagebox.showinfo(APP_TITLE, "Wait for the current task to finish.")
+            return
+        if not files:
+            return
+        paths = [f.path for f in files]
+        path_keys = [self._path_key(f) for f in files]
+        self._set_busy(True)
+        if action == "delete":
+            self._set_status(f"Deleting {len(files)} file(s)…")
+        else:
+            self._set_status(f"Quarantining {len(files)} file(s)…")
+        threading.Thread(
+            target=self._bulk_dup_cleanup_worker,
+            args=(action, paths, path_keys),
+            daemon=True,
+        ).start()
+
+    def _bulk_dup_cleanup_worker(
+        self,
+        action: str,
+        paths: list[Path],
+        path_keys: list[str],
+    ) -> None:
+        started = time.monotonic()
+        session: Optional[Path] = None
+        log: list[str] = []
+        try:
+            if action == "delete":
+                log = permanently_delete(
+                    paths,
+                    status_cb=self._worker_status,
+                    should_cancel=self._should_cancel,
+                )
+            else:
+                session, log = move_to_quarantine(
+                    paths,
+                    status_cb=self._worker_status,
+                    should_cancel=self._should_cancel,
+                )
+        except Exception as exc:
+            log = [f"[error] {exc}"]
+        took = format_duration(time.monotonic() - started)
+        self.after(
+            0,
+            self._bulk_dup_cleanup_done,
+            action,
+            paths,
+            path_keys,
+            log,
+            session,
+            took,
+        )
+
+    def _bulk_dup_cleanup_done(
+        self,
+        action: str,
+        paths: list[Path],
+        path_keys: list[str],
+        log: list[str],
+        session: Optional[Path],
+        took: str,
+    ) -> None:
+        self._set_busy(False)
+        for key in path_keys:
+            self._dup_marked_paths.discard(key)
+        self._remove_paths_from_reports(set(paths))
+        self._refresh_marked_label()
+        self._refresh_workflow()
+        summary = next((line for line in reversed(log) if line.startswith("Summary:")), "")
+        cancelled = any("[cancelled]" in line for line in log)
+        count = len(paths)
+        if action == "delete":
+            title_bits = [f"Delete finished in {took}."]
+            if summary:
+                title_bits.append(summary)
+            if cancelled:
+                title_bits.append("Cancelled early — some files may remain.")
+            messagebox.showinfo(
+                APP_TITLE,
+                "\n".join(title_bits) + "\n\n" + "\n".join(log[:12]),
+            )
+            self._set_status(
+                f"Delete finished ({count} queued) in {took}."
+                + (" Cancelled." if cancelled else "")
+            )
+        else:
+            if session is not None:
+                self._remember_quarantine_session(session)
+            where = str(session) if session else "(see log)"
+            title_bits = [f"Quarantine finished in {took}.", f"Folder:\n{where}"]
+            if summary:
+                title_bits.append(summary)
+            if cancelled:
+                title_bits.append("Cancelled early — some files may remain.")
+            messagebox.showinfo(
+                APP_TITLE,
+                "\n\n".join(title_bits)
+                + "\n\nA manifest.json file lists original locations.\n"
+                "Use “Open last quarantine” anytime.\n\n"
+                + "\n".join(log[:8]),
+            )
+            self._set_status(
+                f"Quarantined toward {where} in {took}."
+                + (" Cancelled." if cancelled else "")
+            )
 
     def quarantine_selected_compare_files(self) -> None:
         # Prefer all marked files across groups when browsing with persistent marks
@@ -1505,16 +1880,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         )
         if not ok:
             return
-        session, log = move_to_quarantine([c.path for c in chosen])
-        paths = {c.path.resolve() for c in chosen}
-        paths |= {c.path for c in chosen}
-        for c in chosen:
-            self._dup_marked_paths.discard(self._path_key(c))
-        self._remove_paths_from_reports(paths)
-        self._remember_quarantine_session(session)
-        self._refresh_marked_label()
-        messagebox.showinfo(APP_TITLE, f"Quarantined to:\n{session}\n\n" + "\n".join(log[:8]))
-        self._set_status(f"Quarantined {len(chosen)} marked file(s).")
+        self._start_bulk_dup_cleanup(chosen, "quarantine")
 
     def delete_selected_compare_files(self) -> None:
         chosen = self._all_marked_files() or self._selected_compare_files()
@@ -1543,14 +1909,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         )
         if not ok2:
             return
-        log = permanently_delete([c.path for c in chosen])
-        paths = {c.path for c in chosen}
-        for c in chosen:
-            self._dup_marked_paths.discard(self._path_key(c))
-        self._remove_paths_from_reports(paths)
-        self._refresh_marked_label()
-        messagebox.showinfo(APP_TITLE, "Delete finished.\n\n" + "\n".join(log[:12]))
-        self._set_status(f"Permanently deleted {len(chosen)} marked file(s).")
+        self._start_bulk_dup_cleanup(chosen, "delete")
 
     def _build_organise_tab(self) -> None:
         tab = self.tabs.tab("Organise")
@@ -1925,6 +2284,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         self.custom_structure_box = ctk.CTkTextbox(
             opts, height=130, font=ctk.CTkFont(family="monospace", size=11)
         )
+        self.custom_structure_box._allow_edit = True  # type: ignore[attr-defined]
         self.custom_structure_box.grid(row=20, column=0, sticky="ew", padx=8, pady=(2, 10))
         saved_custom = str(self._settings.get("custom_structure_text") or "").strip()
         self.custom_structure_box.insert(
@@ -1950,7 +2310,7 @@ class ArchiveOrganiserApp(ctk.CTk):
             "Open Advanced for categories, date folders, and naming.\n"
             "Folder names use plain English (Personal, Media) — not numbered prefixes.",
         )
-        self.layout_tree_box.configure(state="disabled")
+        make_textbox_readonly_copyable(self.layout_tree_box)
 
         self.org_box = ctk.CTkTextbox(bottom)
         self.org_box.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
@@ -1959,7 +2319,7 @@ class ArchiveOrganiserApp(ctk.CTk):
             "Organise plan appears here after Preview plan.\n"
             "Default is Copy (safer) — originals stay until you delete them.",
         )
-        self.org_box.configure(state="disabled")
+        make_textbox_readonly_copyable(self.org_box)
 
         row = ctk.CTkFrame(tab, fg_color="transparent")
         row.grid(row=3, column=0, sticky="ew", padx=8, pady=(2, 6))
@@ -2197,7 +2557,8 @@ class ArchiveOrganiserApp(ctk.CTk):
         body.grid(row=1, column=0, sticky="nsew", padx=14, pady=4)
         lines = suggestion.summary_lines or format_suggestion_summary(suggestion)
         body.insert("1.0", "\n".join(lines))
-        body.configure(state="disabled")
+        make_textbox_readonly_copyable(body)
+        enable_copyable_text(dialog, on_copied=self._on_text_copied)
 
         buttons = ctk.CTkFrame(dialog, fg_color="transparent")
         buttons.grid(row=2, column=0, sticky="ew", padx=14, pady=(8, 14))
@@ -2394,7 +2755,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         self.layout_tree_box.configure(state="normal")
         self.layout_tree_box.delete("1.0", "end")
         self.layout_tree_box.insert("1.0", text)
-        self.layout_tree_box.configure(state="disabled")
+        make_textbox_readonly_copyable(self.layout_tree_box)
 
     def _refresh_layout_options_from_scan(self) -> None:
         if not self._has_scan_files():
@@ -2491,9 +2852,26 @@ PRIVACY & SAFETY
 • Nothing is uploaded. Prefer quarantine. Test on a small folder first.
 """,
         )
-        help_box.configure(state="disabled")
+        make_textbox_readonly_copyable(help_box)
 
     # ---------- helpers ----------
+
+    def _on_text_copied(self, text: str) -> None:
+        preview = text.replace("\n", " ").strip()
+        if len(preview) > 60:
+            preview = preview[:57] + "…"
+        self._set_status(f"Copied: {preview}" if preview else "Copied.")
+
+    def _enable_copyable_text(self, root=None) -> None:
+        """Allow selecting/copying text across labels and read-only boxes."""
+        editable = set()
+        if hasattr(self, "custom_structure_box"):
+            editable.add(self.custom_structure_box)
+        enable_copyable_text(
+            root or self,
+            editable_textboxes=editable,
+            on_copied=self._on_text_copied,
+        )
 
     def _set_status(self, text: str) -> None:
         """
@@ -2913,6 +3291,7 @@ PRIVACY & SAFETY
                 anchor="w",
                 font=ctk.CTkFont(size=12),
             ).pack(anchor="w", padx=8, pady=(0, 10))
+            self._enable_copyable_text(self.source_list_frame)
             return
 
         for path in self.source_paths:
@@ -2930,12 +3309,13 @@ PRIVACY & SAFETY
                 height=26,
                 command=lambda p=path: self._open_folder(Path(p)),
             ).pack(side="right", padx=(4, 0))
+        self._enable_copyable_text(self.source_list_frame)
 
     def _write_box(self, box: ctk.CTkTextbox, text: str) -> None:
         box.configure(state="normal")
         box.delete("1.0", "end")
         box.insert("1.0", text)
-        box.configure(state="disabled")
+        make_textbox_readonly_copyable(box)
 
     # ---------- sources ----------
 
@@ -3355,7 +3735,6 @@ PRIVACY & SAFETY
         extras = self._all_disk_extras()
         if extras is None:
             return
-        count = len(extras)
         qpath = quarantine_root()
         summary = self._extras_summary_text(extras, "QUARANTINE ALL DUPLICATE EXTRAS")
         ok = messagebox.askyesno(
@@ -3366,19 +3745,7 @@ PRIVACY & SAFETY
         )
         if not ok:
             return
-        session, log = move_to_quarantine([e.path for e in extras])
-        paths = {e.path for e in extras}
-        self._remove_paths_from_reports(paths)
-        self._remember_quarantine_session(session)
-        messagebox.showinfo(
-            APP_TITLE,
-            f"Quarantine session created:\n{session}\n\n"
-            "A manifest.json file lists original locations.\n"
-            "Use “Open last quarantine” anytime.\n\n"
-            + "\n".join(log[:6]),
-        )
-        self._set_status(f"Quarantined {count} files → {session}")
-        self._refresh_workflow()
+        self._start_bulk_dup_cleanup(extras, "quarantine")
 
     def delete_all_extras(self) -> None:
         """Permanently delete every extra copy across all groups (keeps oldest KEEP)."""
@@ -3398,19 +3765,11 @@ PRIVACY & SAFETY
             return
         ok2 = messagebox.askyesno(
             APP_TITLE,
-            f"Final confirmation: permanently delete all {count} extra duplicate(s)?",
+            f"Final confirmation: permanently delete {count} extra duplicate(s)?",
         )
         if not ok2:
             return
-        log = permanently_delete([e.path for e in extras])
-        paths = {e.path for e in extras}
-        self._remove_paths_from_reports(paths)
-        messagebox.showinfo(
-            APP_TITLE,
-            f"Deleted {count} extra duplicate(s).\n\n" + "\n".join(log[:12]),
-        )
-        self._set_status(f"Permanently deleted {count} extra duplicate(s).")
-        self._refresh_workflow()
+        self._start_bulk_dup_cleanup(extras, "delete")
 
     def _all_disk_extras(self) -> Optional[list[FileInfo]]:
         """Extra (non-KEEP) on-disk files from every group, or None if nothing to do."""
@@ -3538,6 +3897,7 @@ PRIVACY & SAFETY
             dest,
             title=f"Dry-run browser — {layout_combo_label(layout_ids)}",
         )
+        self._enable_copyable_text(win)
         win.focus()
 
     def apply_organise(self) -> None:
