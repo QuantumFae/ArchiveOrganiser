@@ -9,3 +9,4 @@ ArchiveOrganiser_Quarantine/
 build/
 dist/
 *.spec
+file inventory.txt
