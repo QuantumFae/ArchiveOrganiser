@@ -66,6 +66,7 @@ from organiser import (
     layout_tree_text,
     normalize_category_subfolders,
     normalize_media_date_depth,
+    recommended_layout_core,
     recommended_layout_ids,
 )
 from plan_browser import PlanBrowserWindow
@@ -1671,7 +1672,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
             layout_tools,
-            text="Single layout only",
+            text="Clear to one",
             width=140,
             height=30,
             command=self._clear_layouts_to_one,
@@ -1683,6 +1684,7 @@ class ArchiveOrganiserApp(ctk.CTk):
         self.layout_check_frame.grid_columnconfigure(0, weight=1)
         self._layout_check_widgets: list = []
         self._layout_recommended_ids: list[str] = ["type_date"]
+        self._layout_recommended_core: list[str] = ["type_date"]
 
         self.layout_combine_label = ctk.CTkLabel(
             layouts_tab,
@@ -2019,7 +2021,11 @@ class ArchiveOrganiserApp(ctk.CTk):
         except Exception:
             pass
 
-    def _rebuild_layout_options(self, recommended: Optional[list[str]] = None) -> None:
+    def _rebuild_layout_options(
+        self,
+        recommended: Optional[list[str]] = None,
+        recommended_core: Optional[list[str]] = None,
+    ) -> None:
         """Rebuild layout checkboxes; tick one or more to combine folder structures."""
         for child in self.layout_check_frame.winfo_children():
             child.destroy()
@@ -2027,6 +2033,13 @@ class ArchiveOrganiserApp(ctk.CTk):
 
         order = recommended or [p.id for p in LAYOUT_PRESETS]
         self._layout_recommended_ids = list(order)
+        if recommended_core:
+            self._layout_recommended_core = [
+                lid for lid in recommended_core if lid != "custom"
+            ] or ["type_date"]
+        else:
+            # Without a scan core list, the top ordered id is the recommendation.
+            self._layout_recommended_core = [order[0]] if order else ["type_date"]
         seen: set[str] = set()
         ordered_ids: list[str] = []
         for layout_id in order:
@@ -2092,9 +2105,14 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._on_layout_chosen()
 
     def _use_recommended_layouts(self) -> None:
-        """Tick only the top recommended layout (or type_date)."""
-        recommended = self._layout_recommended_ids or ["type_date"]
-        keep = recommended[0] if recommended else "type_date"
+        """Tick recommended layout ids only (best fit); clear other ticks."""
+        core = [
+            lid
+            for lid in (getattr(self, "_layout_recommended_core", None) or ["type_date"])
+            if lid in self.layout_vars and lid != "custom"
+        ]
+        # Beginner-friendly default: tick the single best layout, not a multi-layout nest.
+        keep = core[0] if core else next(iter(self.layout_vars), "type_date")
         if keep not in self.layout_vars:
             keep = next(iter(self.layout_vars), "type_date")
         for lid, var in self.layout_vars.items():
@@ -2385,13 +2403,16 @@ class ArchiveOrganiserApp(ctk.CTk):
             )
             for cat, var in self.category_vars.items():
                 var.set(True)
-            self._rebuild_layout_options(recommended=["type_date"])
+            self._rebuild_layout_options(
+                recommended=["type_date"], recommended_core=["type_date"]
+            )
             return
         files = self._scan_files()
         counts: dict[str, int] = {}
         for info in files:
             counts[info.category] = counts.get(info.category, 0) + 1
         summary = ", ".join(f"{k}: {v}" for k, v in sorted(counts.items()))
+        core = recommended_layout_core(files)
         recommended = recommended_layout_ids(files)
         best = get_layout(recommended[0])
         self.layout_hint.configure(
@@ -2404,7 +2425,7 @@ class ArchiveOrganiserApp(ctk.CTk):
             var.set(counts.get(cat, 0) > 0)
         # Fresh recommendation tick (rebuild defaults to top recommended)
         self.layout_vars = {}
-        self._rebuild_layout_options(recommended=recommended)
+        self._rebuild_layout_options(recommended=recommended, recommended_core=core)
 
     def _build_help_tab(self) -> None:
         tab = self.tabs.tab("Help")
@@ -2448,6 +2469,12 @@ class ArchiveOrganiserApp(ctk.CTk):
    • Existing archive roots are OK — Apply adds into them (creates missing folders only;
      never deletes or overwrites destination files; name clashes become name_1.ext).
    • Left pane has two tabs: Layouts (choose structure) and Advanced (full-height options).
+   • Each layout shows a short description + example. Use recommended ticks the best fit;
+     Clear to one keeps a single layout. Combine order under the list shows nesting (A → B).
+   • Useful extras: Keep source folders (DriveName/…/file) and Shallow by type (category only).
+   • Advanced → Media date folders: none / year only / year + month.
+   • Advanced → Per-category folders: follow layout, flat, by year, by year+month, or by extension
+     (overrides nesting for that category without writing custom rule text).
    • Suggest layout for me: offline rules (or optional local Ollama) fill layouts + folder options.
    • Advanced → Use local AI (Ollama) is optional and off by default; falls back to rules if needed.
    • Life-area folders use plain names (Personal, Media, Finance) — not 01_Personal.

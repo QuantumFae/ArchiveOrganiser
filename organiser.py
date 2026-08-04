@@ -311,9 +311,9 @@ def category_counts(files: list[FileInfo]) -> dict[str, int]:
     return counts
 
 
-def recommended_layout_ids(files: list[FileInfo]) -> list[str]:
+def recommended_layout_core(files: list[FileInfo]) -> list[str]:
     """
-    Suggest layouts that fit what was found in the scan.
+    Layout ids that best fit the scan (not the full preset list).
     First item is the best default.
     """
     counts = category_counts(files)
@@ -327,17 +327,21 @@ def recommended_layout_ids(files: list[FileInfo]) -> list[str]:
     docs = counts.get("Documents", 0)
     media = photos + videos + audio
 
-    ranked: list[str] = []
-
     if media / total >= 0.6 and docs / total <= 0.25:
-        ranked.extend(["media_library", "life_areas", "type_date", "by_year_month", "active_archive"])
-    elif docs / total >= 0.5:
-        ranked.extend(["life_areas", "documents_first", "para", "by_extension", "type_date"])
-    elif len(counts) >= 3:
-        ranked.extend(["life_areas", "type_date", "para", "active_archive", "by_type"])
-    else:
-        ranked.extend(["by_type", "life_areas", "type_date", "by_extension"])
+        return ["media_library", "life_areas", "type_date", "by_year_month", "active_archive"]
+    if docs / total >= 0.5:
+        return ["life_areas", "documents_first", "para", "by_extension", "type_date"]
+    if len(counts) >= 3:
+        return ["life_areas", "type_date", "para", "active_archive", "by_type"]
+    return ["by_type", "life_areas", "type_date", "by_extension"]
 
+
+def recommended_layout_ids(files: list[FileInfo]) -> list[str]:
+    """
+    Suggest layouts that fit what was found in the scan.
+    First item is the best default; remaining presets follow for the picker.
+    """
+    ranked = list(recommended_layout_core(files))
     # Always offer all presets; recommended ones stay at the front
     for preset in LAYOUT_PRESETS:
         if preset.id not in ranked:

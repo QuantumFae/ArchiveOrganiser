@@ -109,12 +109,13 @@ Each session includes a `manifest.json` listing original paths. Restore by movin
    Apply **adds into** that tree: creates missing folders only, never deletes destination
    content, and never overwrites an existing file (clashes become `name_1.ext`).
 2. Pick one or more **folder layouts** (each shows a short description + example):
-   - **Use recommended** ticks the best fit from your scan; **Single layout only** keeps one layout.
-   - Combine order appears under the list (extra layouts nest folder parts together).
-   - Useful extras: **Keep source folders** (preserve relative paths) and **Shallow by type** (category only).
-3. Open **Show advanced options** when you need finer control:
+   - **Use recommended** ticks the best fit from your scan; **Clear to one** keeps a single layout.
+   - **Combine order** under the list shows how nested layouts stack (extra layouts nest folder parts).
+   - Useful extras: **Keep source folders** (`DriveName/…/file`) and **Shallow by type** (category only).
+3. Open the **Advanced** tab when you need finer control:
    - **Media date folders:** none / year only / year + month
    - **Per-category folders:** follow layout, flat, by year, by year+month, or by extension
+   - Documents-by-extension and separate Archives stay as simple checkboxes
    - Custom structure text (when layout = Custom): `Photos = MyArchive/Photos/{year}/{month}`
 4. Drag the **sashes** to resize options, preview, and plan panes.
 5. Keep **Dry run only** ticked → **Preview plan** → **Run dry run** / **Browse dry-run…**.
