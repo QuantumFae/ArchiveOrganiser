@@ -277,6 +277,9 @@ class ArchiveOrganiserApp(ctk.CTk):
         self.include_junk_var = tk.BooleanVar(value=bool(self._settings.get("include_junk")))
         self.scan_zips_var = tk.BooleanVar(value=bool(self._settings.get("scan_zips")))
         self.extract_zips_var = tk.BooleanVar(value=bool(self._settings.get("extract_zips")))
+        self.delete_zip_after_extract_var = tk.BooleanVar(
+            value=bool(self._settings.get("delete_zip_after_extract"))
+        )
         self.delete_zip_if_low_space_var = tk.BooleanVar(
             value=bool(self._settings.get("delete_zip_if_low_space"))
         )
@@ -292,20 +295,33 @@ class ArchiveOrganiserApp(ctk.CTk):
         ).pack(anchor="w", padx=8, pady=2)
         ctk.CTkCheckBox(
             opts_frame,
-            text="Unzip .zip files beside them during scan (Vacation.zip → Vacation_unzipped/; uses disk; keeps the .zip)",
+            text=(
+                "Unzip .zip files during scan "
+                "(Vacation.zip → Vacation_unzipped/, then scan that folder)"
+            ),
             variable=self.extract_zips_var,
-            command=self._sync_delete_zip_low_space_option,
+            command=self._sync_unzip_delete_options,
         ).pack(anchor="w", padx=8, pady=2)
+        self.delete_zip_after_extract_cb = ctk.CTkCheckBox(
+            opts_frame,
+            text=(
+                "After a successful unzip, delete the original .zip "
+                "(never deletes if unzip fails; scan uses the unzipped folder)"
+            ),
+            variable=self.delete_zip_after_extract_var,
+            command=self._sync_unzip_delete_options,
+        )
+        self.delete_zip_after_extract_cb.pack(anchor="w", padx=28, pady=(0, 2))
         self.delete_zip_low_space_cb = ctk.CTkCheckBox(
             opts_frame,
             text=(
-                "If the drive is low on space, delete the .zip after a successful unzip "
-                "(never deletes if unzip fails; only used when Unzip above is on)"
+                "Only delete the .zip when the drive is low on space "
+                "(after a successful unzip; ignored if “delete .zip” above is on)"
             ),
             variable=self.delete_zip_if_low_space_var,
         )
         self.delete_zip_low_space_cb.pack(anchor="w", padx=28, pady=(0, 2))
-        self._sync_delete_zip_low_space_option()
+        self._sync_unzip_delete_options()
 
         buttons = ctk.CTkFrame(opts_frame, fg_color="transparent")
         buttons.pack(fill="x", padx=8, pady=(8, 2))
@@ -2802,10 +2818,10 @@ class ArchiveOrganiserApp(ctk.CTk):
    • Add folder / drive. Tick rows to select; Remove selected / Open as needed.
    • Your sources, destination, layouts, and window size are remembered next launch.
    • Leave “Scan inside .zip” and junk/system folders off for huge drives (both slow scans).
-   • Optional: “Unzip .zip files beside them” creates Vacation_unzipped/ next to Vacation.zip
-     (writes UNZIPPED.txt inside; keeps the .zip by default; skips/renames if that folder exists).
-     Optional follow-up: “If the drive is low on space, delete the .zip after a successful unzip”
-     (off by default; only runs after extract succeeds — never deletes if unzip fails).
+   • Optional: “Unzip .zip files during scan” creates Vacation_unzipped/ next to Vacation.zip
+     (writes UNZIPPED.txt; then scans that folder; keeps the .zip by default).
+     Optional: “After a successful unzip, delete the original .zip”
+     (never deletes if unzip fails). Or only delete when the drive is low on space.
      When unzip-on-scan is on, the scan uses the extracted files and does not also list zip members.
    • Click Scan now. Fast folder walk + on-disk SQLite index; use Reload last scan to avoid re-scanning.
    • One-click start: run scripts/install_desktop_launcher.sh once.
@@ -3043,6 +3059,9 @@ PRIVACY & SAFETY
             "include_junk": bool(self.include_junk_var.get()) if hasattr(self, "include_junk_var") else False,
             "scan_zips": bool(self.scan_zips_var.get()) if hasattr(self, "scan_zips_var") else False,
             "extract_zips": bool(self.extract_zips_var.get()) if hasattr(self, "extract_zips_var") else False,
+            "delete_zip_after_extract": bool(self.delete_zip_after_extract_var.get())
+            if hasattr(self, "delete_zip_after_extract_var")
+            else False,
             "delete_zip_if_low_space": bool(self.delete_zip_if_low_space_var.get())
             if hasattr(self, "delete_zip_if_low_space_var")
             else False,
@@ -3080,16 +3099,34 @@ PRIVACY & SAFETY
             "last_scan_db": str(last_scan_db_path()),
         }
 
-    def _sync_delete_zip_low_space_option(self) -> None:
-        """Enable the low-space zip-delete box only when Unzip-on-scan is ticked."""
-        if not hasattr(self, "delete_zip_low_space_cb"):
-            return
-        enabled = bool(self.extract_zips_var.get()) if hasattr(self, "extract_zips_var") else False
-        state = "normal" if enabled else "disabled"
-        try:
-            self.delete_zip_low_space_cb.configure(state=state)
-        except tk.TclError:
-            pass
+    def _sync_unzip_delete_options(self) -> None:
+        """Enable zip-delete options only when Unzip-on-scan is ticked."""
+        extract_on = (
+            bool(self.extract_zips_var.get()) if hasattr(self, "extract_zips_var") else False
+        )
+        always_delete = (
+            bool(self.delete_zip_after_extract_var.get())
+            if hasattr(self, "delete_zip_after_extract_var")
+            else False
+        )
+        if hasattr(self, "delete_zip_after_extract_cb"):
+            try:
+                self.delete_zip_after_extract_cb.configure(
+                    state="normal" if extract_on else "disabled"
+                )
+            except tk.TclError:
+                pass
+        if hasattr(self, "delete_zip_low_space_cb"):
+            # Low-space delete is an alternative to always-delete
+            low_space_on = extract_on and not always_delete
+            try:
+                self.delete_zip_low_space_cb.configure(
+                    state="normal" if low_space_on else "disabled"
+                )
+            except tk.TclError:
+                pass
+            if always_delete and hasattr(self, "delete_zip_if_low_space_var"):
+                self.delete_zip_if_low_space_var.set(False)
 
     def _persist_settings(self) -> None:
         try:
@@ -3214,6 +3251,7 @@ PRIVACY & SAFETY
         include_junk = store.get_meta("include_junk", "0") == "1"
         scan_zips = store.get_meta("scan_zips", "0") == "1"
         extract_zips = store.get_meta("extract_zips", "0") == "1"
+        delete_zip_after_extract = store.get_meta("delete_zip_after_extract", "0") == "1"
         delete_zip_if_low_space = store.get_meta("delete_zip_if_low_space", "0") == "1"
         if hasattr(self, "include_junk_var"):
             self.include_junk_var.set(include_junk)
@@ -3221,9 +3259,11 @@ PRIVACY & SAFETY
             self.scan_zips_var.set(scan_zips)
         if hasattr(self, "extract_zips_var"):
             self.extract_zips_var.set(extract_zips)
+        if hasattr(self, "delete_zip_after_extract_var"):
+            self.delete_zip_after_extract_var.set(delete_zip_after_extract)
         if hasattr(self, "delete_zip_if_low_space_var"):
             self.delete_zip_if_low_space_var.set(delete_zip_if_low_space)
-        self._sync_delete_zip_low_space_option()
+        self._sync_unzip_delete_options()
 
         duration = 0.0
         try:
@@ -3417,8 +3457,11 @@ PRIVACY & SAFETY
             include_junk_system=self.include_junk_var.get(),
             scan_zip_contents=self.scan_zips_var.get(),
             extract_zips=self.extract_zips_var.get(),
-            delete_zip_if_low_space=bool(self.delete_zip_if_low_space_var.get())
+            delete_zip_after_extract=bool(self.delete_zip_after_extract_var.get())
             and bool(self.extract_zips_var.get()),
+            delete_zip_if_low_space=bool(self.delete_zip_if_low_space_var.get())
+            and bool(self.extract_zips_var.get())
+            and not bool(self.delete_zip_after_extract_var.get()),
         )
         db_path = last_scan_db_path()
         result = scan_paths(
@@ -3436,6 +3479,10 @@ PRIVACY & SAFETY
                 store.set_meta("include_junk", "1" if options.include_junk_system else "0")
                 store.set_meta("scan_zips", "1" if options.scan_zip_contents else "0")
                 store.set_meta("extract_zips", "1" if options.extract_zips else "0")
+                store.set_meta(
+                    "delete_zip_after_extract",
+                    "1" if options.delete_zip_after_extract else "0",
+                )
                 store.set_meta(
                     "delete_zip_if_low_space",
                     "1" if options.delete_zip_if_low_space else "0",
@@ -3520,7 +3567,7 @@ PRIVACY & SAFETY
         if result.zips_deleted_low_space:
             lines.insert(
                 6 if result.zips_extracted else 5,
-                f"  · Zips deleted after extract (low space): {result.zips_deleted_low_space}",
+                f"  · Zips deleted after unzip: {result.zips_deleted_low_space}",
             )
         if result.cross_device_skipped:
             lines.append(f"Other-mount folders skipped: {result.cross_device_skipped}")
@@ -3571,10 +3618,7 @@ PRIVACY & SAFETY
         if result.zips_extracted:
             summary += f"\n{result.zips_extracted} zip(s) extracted to *_unzipped folders"
         if result.zips_deleted_low_space:
-            summary += (
-                f"\n{result.zips_deleted_low_space} zip(s) deleted after extract "
-                "(low disk space)"
-            )
+            summary += f"\n{result.zips_deleted_low_space} zip(s) deleted after unzip"
         self.overview_summary.configure(text=summary)
         self._write_box(self.overview_box, "\n".join(lines))
 
