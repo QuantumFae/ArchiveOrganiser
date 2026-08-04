@@ -48,6 +48,9 @@ def build_info_text(
     category: str,
     role: str,
     display_path: Optional[str] = None,
+    source_root: str = "",
+    archive_member: Optional[str] = None,
+    hash_value: Optional[str] = None,
 ) -> str:
     """Human-readable file details for the compare card."""
     from datetime import datetime
@@ -56,15 +59,33 @@ def build_info_text(
     shown = display_path or str(path)
     name = Path(shown.split(" → ")[-1]).name if display_path else path.name
     suffix = Path(name).suffix.lower() or path.suffix.lower() or "(none)"
-    return (
-        f"Role: {role}\n"
-        f"Name: {name}\n"
-        f"Path: {shown}\n"
-        f"Category: {category}\n"
-        f"Size: {format_bytes(size)} ({size} bytes)\n"
-        f"Modified: {when}\n"
-        f"Type: {suffix}"
-    )
+    parent = str(Path(shown).parent) if " → " not in shown else shown.rsplit(" → ", 1)[0]
+    lines = [
+        "ROLE",
+        f"  {role}",
+        "",
+        "FILE",
+        f"  Name: {name}",
+        f"  Category: {category}",
+        f"  Extension: {suffix}",
+        "",
+        "SIZE & DATE",
+        f"  Size: {format_bytes(size)}",
+        f"  Exact bytes: {size:,}",
+        f"  Modified: {when}",
+        "",
+        "LOCATION",
+        f"  Folder: {parent}",
+        f"  Full path: {shown}",
+    ]
+    if source_root:
+        lines.append(f"  Scan source: {source_root}")
+    if archive_member:
+        lines.append(f"  Inside zip as: {archive_member}")
+    if hash_value:
+        short = hash_value if len(hash_value) <= 20 else hash_value[:18] + "…"
+        lines.extend(["", "FINGERPRINT", f"  {short}"])
+    return "\n".join(lines)
 
 
 def load_preview_for_info(file_info, role: str) -> FilePreview:
@@ -76,6 +97,9 @@ def load_preview_for_info(file_info, role: str) -> FilePreview:
         file_info.category,
         role,
         display_path=file_info.display_path,
+        source_root=getattr(file_info, "source_root", "") or "",
+        archive_member=getattr(file_info, "archive_member", None),
+        hash_value=getattr(file_info, "hash_value", None),
     )
     if file_info.is_inside_archive:
         try:

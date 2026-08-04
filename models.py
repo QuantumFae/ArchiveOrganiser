@@ -21,9 +21,8 @@ ARCHIVE_EXTS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz"}
 SCANNABLE_ARCHIVE_EXTS = {".zip"}
 
 
-def category_for(path: Path) -> str:
-    """Return a simple category name for a file."""
-    ext = path.suffix.lower()
+def category_for_ext(ext: str) -> str:
+    """Return a category from a lowercase extension including the leading dot."""
     if ext in IMAGE_EXTS:
         return "Photos"
     if ext in VIDEO_EXTS:
@@ -37,9 +36,19 @@ def category_for(path: Path) -> str:
     return "Other"
 
 
+def category_for(path: Path) -> str:
+    """Return a simple category name for a file."""
+    return category_for_ext(path.suffix.lower())
+
+
 def category_for_name(name: str) -> str:
-    """Category from a filename or zip member name."""
-    return category_for(Path(name))
+    """Category from a filename or zip member name (no Path allocation)."""
+    # Fast suffix: last '.' after the last path separator
+    base = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    dot = base.rfind(".")
+    if dot <= 0:
+        return "Other"
+    return category_for_ext(base[dot:].lower())
 
 
 @dataclass(slots=True)
@@ -107,6 +116,10 @@ class ScanResult:
     file_count: int = 0
     # Zip members skipped due to per-zip / total caps
     zip_members_capped: int = 0
+    # Zips physically extracted to sibling *_unzipped folders during scan
+    zips_extracted: int = 0
+    # Zips removed after a successful extract because free space was low (opt-in)
+    zips_deleted_low_space: int = 0
     # Optional SQLite index (see scan_store.ScanStore)
     store: object = None
 

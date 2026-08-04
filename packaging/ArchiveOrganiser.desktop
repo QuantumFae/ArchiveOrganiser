@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Archive Organiser
+Comment=Private local duplicate finder and file organiser
+Exec=scripts/run_archive_organiser.sh
+Path=.
+Icon=folder
+Terminal=false
+Categories=Utility;FileTools;
+StartupNotify=true

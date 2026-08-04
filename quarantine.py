@@ -29,6 +29,27 @@ def _session_folder(root: Path) -> Path:
     return folder
 
 
+def latest_quarantine_session(base: Optional[str] = None) -> Optional[Path]:
+    """
+    Newest dated quarantine session folder, if any.
+    Prefers folders that look like YYYYMMDD_HHMMSS.
+    """
+    root = quarantine_root(base)
+    if not root.exists():
+        return None
+    sessions: list[Path] = []
+    try:
+        for child in root.iterdir():
+            if child.is_dir() and not child.name.startswith("."):
+                sessions.append(child)
+    except OSError:
+        return None
+    if not sessions:
+        return None
+    sessions.sort(key=lambda p: p.name, reverse=True)
+    return sessions[0]
+
+
 def move_to_quarantine(
     paths: list[Path],
     base: Optional[str] = None,

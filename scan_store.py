@@ -42,11 +42,16 @@ CREATE TABLE IF NOT EXISTS hash_cache (
     hash_value TEXT NOT NULL,
     PRIMARY KEY (path, size, modified)
 );
+
+CREATE TABLE IF NOT EXISTS scan_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
 class ScanStore:
-    """Temporary SQLite database for one scan session."""
+    """SQLite database for one scan session (temp or on-disk for reload)."""
 
     def __init__(self, path: Optional[Path] = None) -> None:
         if path is None:
@@ -57,6 +62,8 @@ class ScanStore:
             path = Path(name)
             self._temp = True
         else:
+            path = Path(path)
+            path.parent.mkdir(parents=True, exist_ok=True)
             self._temp = False
         self.path = path
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
@@ -64,11 +71,19 @@ class ScanStore:
         self.conn.executescript(SCHEMA)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.execute("PRAGMA temp_store=MEMORY")
         self._insert_batch: list[tuple] = []
-        self._batch_size = 400
+        # Larger batches + less frequent commits = faster big-drive scans
+        self._batch_size = 1_500
+        self._flushes_since_commit = 0
+        self._commit_every_flushes = 3
+        self._hash_update_batch: list[tuple] = []
+        self._hash_cache_batch: list[tuple] = []
+        self._hash_batch_size = 250
 
     def close(self) -> None:
         self.flush()
+        self.flush_hash_updates()
         try:
             self.conn.close()
         except Exception:
@@ -83,21 +98,51 @@ class ScanStore:
             except OSError:
                 pass
 
-    def flush(self) -> None:
-        if not self._insert_batch:
-            return
-        self.conn.executemany(
-            """
-            INSERT INTO files (
-                path, size, modified, category, source_root,
-                archive_container, archive_member, zip_crc, is_junk,
-                hash_value, visual_hash, content_fingerprint
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            self._insert_batch,
+    def clear_files(self) -> None:
+        """Remove file rows for a fresh scan; keep hash_cache for speed."""
+        self._insert_batch.clear()
+        self.conn.execute("DELETE FROM files")
+        self.conn.commit()
+        self._flushes_since_commit = 0
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO scan_meta (key, value) VALUES (?, ?)",
+            (key, value),
         )
         self.conn.commit()
-        self._insert_batch.clear()
+
+    def get_meta(self, key: str, default: str = "") -> str:
+        row = self.conn.execute(
+            "SELECT value FROM scan_meta WHERE key = ?", (key,)
+        ).fetchone()
+        return str(row["value"]) if row else default
+
+    def meta_dict(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for row in self.conn.execute("SELECT key, value FROM scan_meta"):
+            out[str(row["key"])] = str(row["value"])
+        return out
+
+    def flush(self, *, commit: bool = False) -> None:
+        """Write pending inserts. Commits every few flushes (or when commit=True)."""
+        if self._insert_batch:
+            self.conn.executemany(
+                """
+                INSERT INTO files (
+                    path, size, modified, category, source_root,
+                    archive_container, archive_member, zip_crc, is_junk,
+                    hash_value, visual_hash, content_fingerprint
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                self._insert_batch,
+            )
+            self._insert_batch.clear()
+            self._flushes_since_commit += 1
+        if commit or self._flushes_since_commit >= self._commit_every_flushes:
+            if self._flushes_since_commit or commit:
+                self.conn.commit()
+                self._flushes_since_commit = 0
 
     def insert_file(self, info: FileInfo) -> None:
         self._insert_batch.append(
@@ -189,13 +234,34 @@ class ScanStore:
             yield int(row["size"]), ids
 
     def update_hash(self, file_id: int, hash_value: Optional[str]) -> None:
-        self.conn.execute(
-            "UPDATE files SET hash_value = ? WHERE id = ?",
-            (hash_value, file_id),
-        )
+        """Queue a hash update (flushed in batches for speed)."""
+        self._hash_update_batch.append((hash_value, file_id))
+        if len(self._hash_update_batch) >= self._hash_batch_size:
+            self.flush_hash_updates()
+
+    def flush_hash_updates(self, *, commit: bool = True) -> None:
+        if self._hash_update_batch:
+            self.conn.executemany(
+                "UPDATE files SET hash_value = ? WHERE id = ?",
+                self._hash_update_batch,
+            )
+            self._hash_update_batch.clear()
+        if self._hash_cache_batch:
+            self.conn.executemany(
+                """
+                INSERT OR REPLACE INTO hash_cache (path, size, modified, hash_value)
+                VALUES (?, ?, ?, ?)
+                """,
+                self._hash_cache_batch,
+            )
+            self._hash_cache_batch.clear()
+        if commit:
+            self.conn.commit()
+            self._flushes_since_commit = 0
 
     def commit(self) -> None:
-        self.conn.commit()
+        self.flush(commit=True)
+        self.flush_hash_updates(commit=True)
 
     def cached_hash(self, path: str, size: int, modified: float) -> Optional[str]:
         row = self.conn.execute(
@@ -208,13 +274,9 @@ class ScanStore:
         return row["hash_value"] if row else None
 
     def store_hash_cache(self, path: str, size: int, modified: float, hash_value: str) -> None:
-        self.conn.execute(
-            """
-            INSERT OR REPLACE INTO hash_cache (path, size, modified, hash_value)
-            VALUES (?, ?, ?, ?)
-            """,
-            (path, size, modified, hash_value),
-        )
+        self._hash_cache_batch.append((path, size, modified, hash_value))
+        if len(self._hash_cache_batch) >= self._hash_batch_size:
+            self.flush_hash_updates()
 
     @staticmethod
     def _row_to_info(row: sqlite3.Row) -> FileInfo:

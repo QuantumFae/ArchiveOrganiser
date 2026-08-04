@@ -48,11 +48,40 @@ class DuplicateGroup:
         if self.reason:
             return self.reason
         labels = {
-            "exact": "Exact copy",
-            "similar_photo": "Similar photo",
-            "similar_document": "Similar document",
+            "exact": "Exact copies",
+            "similar_photo": "Similar photos",
+            "similar_document": "Similar documents",
         }
         return labels.get(self.kind, self.kind)
+
+    @property
+    def primary_category(self) -> str:
+        return self.files[0].category if self.files else "Other"
+
+    def english_heading(self) -> str:
+        """Short plain-English title for the group list."""
+        if not self.files:
+            return self.label
+        name = self.files[0].name
+        if len(name) > 36:
+            name = name[:33] + "..."
+        cat = self.primary_category
+        n = len(self.files)
+        keep = "keep oldest"
+        if self.kind == "exact":
+            return f"{self.label} · {cat}\n{name}\n{n} files · keep oldest"
+        return f"{self.label} · {cat}\n{name}\n{n} files · {keep}"
+
+
+def sort_groups_by_file_type(groups: list[DuplicateGroup]) -> list[DuplicateGroup]:
+    """Group same categories together, largest groups first within a category."""
+    order = {"Photos": 0, "Videos": 1, "Audio": 2, "Documents": 3, "Archives": 4, "Other": 5}
+
+    def key(group: DuplicateGroup) -> tuple:
+        cat = group.primary_category
+        return (order.get(cat, 9), cat, group.kind, -len(group.files), -group.size)
+
+    return sorted(groups, key=key)
 
 
 @dataclass
