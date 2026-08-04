@@ -4,3 +4,5 @@ __pycache__/
 ArchiveOrganiser_Quarantine/
 *.egg-info/
 .DS_Store
+.archive_organiser_config/
+.archive_organiser_data/
