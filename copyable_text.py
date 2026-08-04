@@ -143,6 +143,8 @@ def _bind_copy_menu(
     widget.bind("<Button-3>", popup, add="+")
     # Button-2 is middle click on Linux; some trackpads use it for secondary
     widget.bind("<Button-2>", popup, add="+")
+    # macOS often maps secondary click to Control + click
+    widget.bind("<Control-Button-1>", popup, add="+")
 
 
 def enable_copyable_text(

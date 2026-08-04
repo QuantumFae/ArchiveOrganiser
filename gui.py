@@ -89,6 +89,8 @@ _PROGRESS_FRACTION_RE = re.compile(r"(?<!\d)(\d+)\s*/\s*(\d+)(?!\d)")
 _COMPARE_SIDE_BY_SIDE_MAX = 4
 _COMPARE_GRID_CARD_MIN = 250
 _COMPARE_GRID_THUMB = 220
+# Keep only a bounded working copy for resize (not full-resolution camera originals)
+_COMPARE_WORKING_MAX = 900
 
 
 class ArchiveOrganiserApp(ctk.CTk):
@@ -574,9 +576,15 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._compare_checkboxes.clear()
         self._compare_file_infos.clear()
         self._compare_is_keep.clear()
-        self._compare_image_refs.clear()
-        self._compare_pil_images.clear()
         self._compare_img_labels.clear()
+        self._compare_image_refs.clear()
+        # Release Pillow bitmaps from the previous group before dropping refs
+        for pil in self._compare_pil_images:
+            try:
+                pil.close()
+            except Exception:
+                pass
+        self._compare_pil_images.clear()
         self._selected_group_index = None
         self._compare_cards_paned = None
         self._compare_vpaned = None
@@ -586,6 +594,19 @@ class ArchiveOrganiserApp(ctk.CTk):
         self._compare_grid_scroll = None
         self._compare_grid_cards = []
         self._compare_grid_cols = 0
+
+    def _store_compare_working_image(self, image) -> object:
+        """
+        Keep a downsized working copy for later resize — not the full original.
+        Returns the working Pillow image stored in _compare_pil_images.
+        """
+        working = image.copy()
+        try:
+            working.thumbnail((_COMPARE_WORKING_MAX, _COMPARE_WORKING_MAX))
+        except Exception:
+            pass
+        self._compare_pil_images.append(working)
+        return working
 
     def _show_duplicates_empty_state(self) -> None:
         """Friendly placeholders before Find duplicates has been run."""
@@ -1032,9 +1053,9 @@ class ArchiveOrganiserApp(ctk.CTk):
         )
 
         if show_image and not show_text:
-            self._compare_pil_images.append(preview.image)
+            working = self._store_compare_working_image(preview.image)
             max_side = _COMPARE_GRID_THUMB
-            pil = preview.image.copy()
+            pil = working.copy()
             pil.thumbnail((max_side, max_side))
             ctk_image = ctk.CTkImage(light_image=pil, dark_image=pil, size=pil.size)
             self._compare_image_refs.append(ctk_image)
@@ -1042,9 +1063,9 @@ class ArchiveOrganiserApp(ctk.CTk):
             img_label.grid(row=0, column=0, padx=4, pady=4, sticky="n")
             self._compare_img_labels.append(img_label)
         elif show_image and show_text:
-            self._compare_pil_images.append(preview.image)
+            working = self._store_compare_working_image(preview.image)
             max_side = max(140, _COMPARE_GRID_THUMB // 2)
-            pil = preview.image.copy()
+            pil = working.copy()
             pil.thumbnail((max_side, max_side))
             ctk_image = ctk.CTkImage(light_image=pil, dark_image=pil, size=pil.size)
             self._compare_image_refs.append(ctk_image)
@@ -1060,8 +1081,8 @@ class ArchiveOrganiserApp(ctk.CTk):
             text_box.grid(row=0, column=0, padx=2, pady=2, sticky="nsew")
             content = preview.text_content or preview.error or "No preview available"
             if preview.image is not None:
-                self._compare_pil_images.append(preview.image)
-                pil = preview.image.copy()
+                working = self._store_compare_working_image(preview.image)
+                pil = working.copy()
                 pil.thumbnail((_COMPARE_GRID_THUMB, _COMPARE_GRID_THUMB))
                 ctk_image = ctk.CTkImage(light_image=pil, dark_image=pil, size=pil.size)
                 self._compare_image_refs.append(ctk_image)
@@ -1228,9 +1249,9 @@ class ArchiveOrganiserApp(ctk.CTk):
         )
         # Always show something: prefer image; if both, stack image then text
         if show_image and not show_text:
-            self._compare_pil_images.append(preview.image)
+            working = self._store_compare_working_image(preview.image)
             max_side = self._compare_thumb_side(total_cards)
-            pil = preview.image.copy()
+            pil = working.copy()
             pil.thumbnail((max_side, max_side))
             ctk_image = ctk.CTkImage(light_image=pil, dark_image=pil, size=pil.size)
             self._compare_image_refs.append(ctk_image)
@@ -1239,9 +1260,9 @@ class ArchiveOrganiserApp(ctk.CTk):
             self._compare_img_labels.append(img_label)
         elif show_image and show_text:
             preview_host.grid_rowconfigure(1, weight=1)
-            self._compare_pil_images.append(preview.image)
+            working = self._store_compare_working_image(preview.image)
             max_side = max(140, self._compare_thumb_side(total_cards) // 2)
-            pil = preview.image.copy()
+            pil = working.copy()
             pil.thumbnail((max_side, max_side))
             ctk_image = ctk.CTkImage(light_image=pil, dark_image=pil, size=pil.size)
             self._compare_image_refs.append(ctk_image)
@@ -1258,9 +1279,9 @@ class ArchiveOrganiserApp(ctk.CTk):
             content = preview.text_content or preview.error or "No preview available"
             # If we have a type-card image but kind was text-only, still show the card
             if preview.image is not None:
-                self._compare_pil_images.append(preview.image)
+                working = self._store_compare_working_image(preview.image)
                 max_side = self._compare_thumb_side(total_cards)
-                pil = preview.image.copy()
+                pil = working.copy()
                 pil.thumbnail((max_side, max_side))
                 ctk_image = ctk.CTkImage(light_image=pil, dark_image=pil, size=pil.size)
                 self._compare_image_refs.append(ctk_image)
@@ -2911,7 +2932,11 @@ PRIVACY & SAFETY
             self.status_label.configure(text=text)
 
     def _worker_status(self, msg: str) -> None:
-        """Thread-safe status update used by background workers."""
+        """
+        Thread-safe status update used by background workers.
+        Must only marshal to the UI thread via after(...) — never configure
+        Tk widgets directly from a worker thread.
+        """
         self.after(0, self._set_status, msg)
 
     def _worker_progress(self, current: int, total: int) -> None:
