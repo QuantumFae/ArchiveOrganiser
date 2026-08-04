@@ -2440,13 +2440,13 @@ class ArchiveOrganiserApp(ctk.CTk):
 1. Sources tab
    • Add folder / drive. Tick rows to select; Remove selected / Open as needed.
    • Your sources, destination, layouts, and window size are remembered next launch.
-   • Leave “Scan inside .zip” off for huge drives (you can turn it on for small libraries).
+   • Leave “Scan inside .zip” and junk/system folders off for huge drives (both slow scans).
    • Optional: “Unzip .zip files beside them” creates Vacation_unzipped/ next to Vacation.zip
      (writes UNZIPPED.txt inside; keeps the .zip by default; skips/renames if that folder exists).
      Optional follow-up: “If the drive is low on space, delete the .zip after a successful unzip”
      (off by default; only runs after extract succeeds — never deletes if unzip fails).
      When unzip-on-scan is on, the scan uses the extracted files and does not also list zip members.
-   • Click Scan now. Results are saved on disk — use Reload last scan to avoid re-scanning.
+   • Click Scan now. Fast folder walk + on-disk SQLite index; use Reload last scan to avoid re-scanning.
    • One-click start: run scripts/install_desktop_launcher.sh once.
 
 2. Overview tab

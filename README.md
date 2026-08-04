@@ -84,7 +84,7 @@ Use a **test folder** with a few copied files first. Learn the buttons before sc
    - **Unzip .zip files beside them during scan** (off by default; creates `Vacation_unzipped/` next to `Vacation.zip`, writes `UNZIPPED.txt`, keeps the original zip). When this is on, the scan prefers the extracted files and does not also list members inside that zip.
    - **If the drive is low on space, delete the .zip after a successful unzip** (off by default; only used with Unzip above; never deletes if unzip fails)
 3. On Linux, external drives often appear under Places as **Drive: …** (from `/media`, `/mnt`, `/run/media`).
-4. Click **Scan now** and wait for the status bar to finish. Large libraries use an **SQLite index** so RAM stays under control.
+4. Click **Scan now** and wait for the status bar to finish. Large libraries use a fast folder walk plus an **SQLite index** so RAM stays under control. Leave zip/junk options off for the quickest first pass.
 
 ### 3. Overview tab
 - Check counts by category and total size.

@@ -21,9 +21,8 @@ ARCHIVE_EXTS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz"}
 SCANNABLE_ARCHIVE_EXTS = {".zip"}
 
 
-def category_for(path: Path) -> str:
-    """Return a simple category name for a file."""
-    ext = path.suffix.lower()
+def category_for_ext(ext: str) -> str:
+    """Return a category from a lowercase extension including the leading dot."""
     if ext in IMAGE_EXTS:
         return "Photos"
     if ext in VIDEO_EXTS:
@@ -37,9 +36,19 @@ def category_for(path: Path) -> str:
     return "Other"
 
 
+def category_for(path: Path) -> str:
+    """Return a simple category name for a file."""
+    return category_for_ext(path.suffix.lower())
+
+
 def category_for_name(name: str) -> str:
-    """Category from a filename or zip member name."""
-    return category_for(Path(name))
+    """Category from a filename or zip member name (no Path allocation)."""
+    # Fast suffix: last '.' after the last path separator
+    base = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    dot = base.rfind(".")
+    if dot <= 0:
+        return "Other"
+    return category_for_ext(base[dot:].lower())
 
 
 @dataclass(slots=True)
