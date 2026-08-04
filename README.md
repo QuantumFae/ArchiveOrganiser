@@ -58,7 +58,7 @@ Use a **test folder** with a few copied files first. Learn the buttons before sc
    - **Include junk / system folders** (Trash, System Volume Information, dot-folders, …)
    - **Scan inside .zip archives** (off by default for huge drives; listings are capped)
 3. On Linux, external drives often appear under Places as **Drive: …** (from `/media`, `/mnt`, `/run/media`).
-4. Click **Scan now** and wait for the status bar to finish. Large libraries use an **SQLite index** so RAM stays under control.
+4. Click **Scan now** and wait for the status bar to finish. Large libraries use a fast folder walk plus an **SQLite index** so RAM stays under control. Leave zip/junk options off for the quickest first pass.
 
 ### 3. Overview tab
 - Check counts by category and total size.

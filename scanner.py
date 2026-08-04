@@ -1,7 +1,8 @@
 """Scan folders and drives for files. Runs only on your computer.
 
 Tuned for large (hundreds of GB / 1TB+) drives:
-- writes metadata to SQLite instead of only a giant Python list
+- os.scandir walk with one stat per entry (fewer syscalls)
+- writes metadata to SQLite in large batches (fewer commits)
 - stays on one filesystem by default (won't follow other mounts)
 - streams hashes in chunks (never loads a whole huge file into RAM)
 - partial CRC first, full CRC only on collisions
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat as stat_module
 import time
 import zipfile
 import zlib
@@ -25,7 +27,7 @@ from models import (
     SCANNABLE_ARCHIVE_EXTS,
     FileInfo,
     ScanResult,
-    category_for,
+    category_for_ext,
     category_for_name,
 )
 from scan_store import ScanStore
@@ -181,6 +183,7 @@ def _list_zip_members(
     store: Optional[ScanStore],
     status_cb: Optional[Callable[[str], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
+    zip_mtime: Optional[float] = None,
 ) -> None:
     """Add FileInfo rows for files inside a .zip, respecting caps."""
     if result.archive_members >= opts.max_zip_members_total:
@@ -191,9 +194,9 @@ def _list_zip_members(
                 f"skipping further zip contents"
             )
         return
+    fallback_mtime = zip_mtime
     try:
-        if not zipfile.is_zipfile(zip_path):
-            return
+        # Open directly — BadZipFile covers non-zips (avoids double disk read)
         with zipfile.ZipFile(zip_path, "r") as zf:
             members_here = 0
             for info in zf.infolist():
@@ -218,7 +221,9 @@ def _list_zip_members(
                     try:
                         mtime = time.mktime(date_tuple + (0, 0, -1))
                     except (OverflowError, ValueError):
-                        mtime = zip_path.stat().st_mtime
+                        if fallback_mtime is None:
+                            fallback_mtime = zip_path.stat().st_mtime
+                        mtime = fallback_mtime
                     member_path = Path(f"{zip_path}|{member}")
                     entry = FileInfo(
                         path=member_path,
@@ -233,7 +238,7 @@ def _list_zip_members(
                     _add_file(result, entry, store)
                     result.archive_members += 1
                     members_here += 1
-                    if status_cb and members_here % 400 == 0:
+                    if status_cb and members_here % 800 == 0:
                         status_cb(
                             f"Listing zip {zip_path.name}: "
                             f"{members_here} entries "
@@ -245,8 +250,20 @@ def _list_zip_members(
         if status_cb and members_here:
             status_cb(f"Listed {members_here} files in {zip_path.name}")
     except (OSError, zipfile.BadZipFile) as exc:
+        # Non-zip files with a .zip suffix are skipped quietly
+        if isinstance(exc, zipfile.BadZipFile):
+            result.skipped += 1
+            return
         result.errors.append(f"Could not open zip {zip_path}: {exc}")
         result.skipped += 1
+
+
+def _suffix_lower(name: str) -> str:
+    """File extension including dot, lowercase (no Path object)."""
+    dot = name.rfind(".")
+    if dot <= 0:
+        return ""
+    return name[dot:].lower()
 
 
 def scan_paths(
@@ -258,6 +275,8 @@ def scan_paths(
     """
     Walk every chosen folder/drive and collect file info.
     Does not move or delete anything.
+
+    Uses os.scandir + one stat per entry (faster than Path.is_file/is_symlink/stat).
     """
     opts = options or ScanOptions()
     result = ScanResult()
@@ -273,9 +292,16 @@ def scan_paths(
         if not status_cb:
             return
         now = time.monotonic()
-        if force or (now - last_status_at) >= 1.0:
+        if force or (now - last_status_at) >= 1.25:
             status_cb(timer.stamp(msg))
             last_status_at = now
+
+    def finish_cancelled() -> ScanResult:
+        result.errors.append("Scan cancelled by user.")
+        if store:
+            store.flush(commit=True)
+        result.duration_seconds = timer.seconds()
+        return result
 
     for root in roots:
         root_path = Path(root).expanduser().resolve()
@@ -292,115 +318,104 @@ def scan_paths(
             result.errors.append(f"Could not read {root_path}: {exc}")
             continue
 
+        root_str = str(root_path)
         maybe_status(f"Scanning: {root_path}", force=True)
 
-        for dirpath, dirnames, filenames in os.walk(root_path, followlinks=False):
+        # Stack of (dir_path_str, junk_here). Depth-first scandir walk.
+        stack: list[tuple[str, bool]] = [(root_str, False)]
+        while stack:
             if should_cancel and should_cancel():
-                result.errors.append("Scan cancelled by user.")
-                if store:
-                    store.flush()
-                result.duration_seconds = timer.seconds()
-                return result
+                return finish_cancelled()
 
-            current = Path(dirpath)
+            dirpath, junk_here = stack.pop()
             try:
-                if opts.stay_on_device and current.stat().st_dev != root_dev:
-                    result.cross_device_skipped += 1
-                    dirnames[:] = []
-                    continue
-            except OSError:
-                dirnames[:] = []
+                with os.scandir(dirpath) as entries:
+                    # Collect first so we can push dirs after files (better locality)
+                    subdirs: list[tuple[str, bool]] = []
+                    for entry in entries:
+                        if should_cancel and should_cancel():
+                            return finish_cancelled()
+                        name = entry.name
+                        try:
+                            st = entry.stat(follow_symlinks=False)
+                        except OSError:
+                            result.skipped += 1
+                            continue
+
+                        mode = st.st_mode
+                        if stat_module.S_ISLNK(mode):
+                            result.skipped += 1
+                            continue
+
+                        if stat_module.S_ISDIR(mode):
+                            if should_skip_dir(name, opts):
+                                continue
+                            if opts.stay_on_device and st.st_dev != root_dev:
+                                result.cross_device_skipped += 1
+                                continue
+                            child_junk = junk_here or (
+                                name in SKIP_DIR_NAMES or name.startswith(".")
+                            )
+                            subdirs.append((entry.path, child_junk))
+                            continue
+
+                        if not stat_module.S_ISREG(mode):
+                            result.skipped += 1
+                            continue
+                        if opts.stay_on_device and st.st_dev != root_dev:
+                            result.cross_device_skipped += 1
+                            continue
+
+                        suffix = _suffix_lower(name)
+                        full = Path(entry.path)
+                        info = FileInfo(
+                            path=full,
+                            size=st.st_size,
+                            modified=st.st_mtime,
+                            category=category_for_ext(suffix),
+                            source_root=root_str,
+                            is_junk_location=junk_here
+                            or (opts.include_junk_system and name.startswith(".")),
+                        )
+                        _add_file(result, info, store)
+
+                        if opts.scan_zip_contents and suffix in SCANNABLE_ARCHIVE_EXTS:
+                            _list_zip_members(
+                                full,
+                                root_path,
+                                result,
+                                opts,
+                                store,
+                                status_cb=maybe_status,
+                                should_cancel=should_cancel,
+                                zip_mtime=st.st_mtime,
+                            )
+                            maybe_status(
+                                f"Scanning… {result.file_count} files · "
+                                f"{format_bytes(result.total_bytes)} "
+                                f"({result.archive_members} in zips)"
+                            )
+                        elif opts.scan_zip_contents and suffix in ARCHIVE_EXTS:
+                            pass
+
+                        if result.file_count % 500 == 0:
+                            maybe_status(
+                                f"Scanning… {result.file_count} files · "
+                                f"{format_bytes(result.total_bytes)}"
+                                + (
+                                    f" ({result.archive_members} in zips)"
+                                    if result.archive_members
+                                    else ""
+                                )
+                            )
+            except OSError as exc:
+                result.errors.append(f"Could not read folder {dirpath}: {exc}")
                 result.skipped += 1
                 continue
 
-            junk_here = any(
-                part in SKIP_DIR_NAMES or part.startswith(".")
-                for part in current.relative_to(root_path).parts
-            ) if current != root_path else False
-
-            kept_dirs: list[str] = []
-            for d in dirnames:
-                if should_skip_dir(d, opts):
-                    continue
-                child = current / d
-                if opts.stay_on_device:
-                    try:
-                        if child.stat().st_dev != root_dev:
-                            result.cross_device_skipped += 1
-                            continue
-                    except OSError:
-                        result.skipped += 1
-                        continue
-                kept_dirs.append(d)
-            dirnames[:] = kept_dirs
-
-            for filename in filenames:
-                if should_cancel and should_cancel():
-                    result.errors.append("Scan cancelled by user.")
-                    if store:
-                        store.flush()
-                    result.duration_seconds = timer.seconds()
-                    return result
-
-                full = Path(dirpath) / filename
-                try:
-                    if full.is_symlink() or not full.is_file():
-                        result.skipped += 1
-                        continue
-                    stat = full.stat()
-                    if opts.stay_on_device and stat.st_dev != root_dev:
-                        result.cross_device_skipped += 1
-                        continue
-                    info = FileInfo(
-                        path=full,
-                        size=stat.st_size,
-                        modified=stat.st_mtime,
-                        category=category_for(full),
-                        source_root=str(root_path),
-                        is_junk_location=junk_here or (
-                            opts.include_junk_system and filename.startswith(".")
-                        ),
-                    )
-                    _add_file(result, info, store)
-
-                    if (
-                        opts.scan_zip_contents
-                        and full.suffix.lower() in SCANNABLE_ARCHIVE_EXTS
-                    ):
-                        _list_zip_members(
-                            full,
-                            root_path,
-                            result,
-                            opts,
-                            store,
-                            status_cb=maybe_status,
-                            should_cancel=should_cancel,
-                        )
-                        maybe_status(
-                            f"Scanning… {result.file_count} files · "
-                            f"{format_bytes(result.total_bytes)} "
-                            f"({result.archive_members} in zips)"
-                        )
-                    elif (
-                        opts.scan_zip_contents
-                        and full.suffix.lower() in ARCHIVE_EXTS
-                        and full.suffix.lower() not in SCANNABLE_ARCHIVE_EXTS
-                    ):
-                        pass
-
-                    if result.file_count % 250 == 0:
-                        maybe_status(
-                            f"Scanning… {result.file_count} files · "
-                            f"{format_bytes(result.total_bytes)}"
-                            + (
-                                f" ({result.archive_members} in zips)"
-                                if result.archive_members
-                                else ""
-                            )
-                        )
-                except OSError as exc:
-                    result.errors.append(f"Could not read {full}: {exc}")
-                    result.skipped += 1
+            # Push subdirs so earlier names are visited first (stack = LIFO)
+            for item in reversed(subdirs):
+                stack.append(item)
 
         maybe_status(
             f"Finished folder: {root_path} — {result.file_count} files · "
@@ -409,7 +424,7 @@ def scan_paths(
         )
 
     if store:
-        store.flush()
+        store.flush(commit=True)
         result.file_count = store.count()
         result.total_bytes = store.total_bytes()
 
@@ -479,6 +494,9 @@ def add_hashes(
             store.update_hash(sid, value)
             if not info.is_inside_archive:
                 store.store_hash_cache(str(info.path), info.size, info.modified, value)
+            # Periodic commit so cancel mid-hash keeps most progress
+            if sid % 500 == 0:
+                store.flush_hash_updates(commit=True)
 
     # --- Pass 1: cache / zip / partial ---
     partial_map: dict[str, list[FileInfo]] = {}

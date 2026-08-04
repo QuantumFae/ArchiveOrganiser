@@ -1483,8 +1483,8 @@ class ArchiveOrganiserApp(ctk.CTk):
 
 1. Sources tab
    • Add folder / drive. Tick rows to select; Remove selected / Open as needed.
-   • Leave “Scan inside .zip” off for huge drives (you can turn it on for small libraries).
-   • Click Scan now. Large libraries use an on-disk SQLite index so RAM stays sane.
+   • Leave “Scan inside .zip” and junk/system folders off for huge drives (both slow scans).
+   • Click Scan now. Large libraries use a fast folder walk + on-disk SQLite index.
 
 2. Overview tab
    • Read counts, size, and timing. Save a report if you like.
